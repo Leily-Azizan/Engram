@@ -1,0 +1,30 @@
+{% extends 'base.html' %}
+{% load content_extras %}
+{% block title %}Exams · Engram{% endblock %}
+{% block topbar %}Exams{% endblock %}
+{% block content %}
+<h1>📝 Exams</h1>
+<p class="subtitle">Retrieval practice under pressure. Aim for 70%+ to consider a topic solid.</p>
+
+{% for quiz in quizzes %}
+  <div class="card">
+    <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
+      <div>
+        <h3 style="margin:0;"><a href="{{ quiz.get_absolute_url }}">{{ quiz.title }}</a></h3>
+        <div class="muted" style="font-size:13px;">
+          {{ quiz.get_scope_display }} · {{ quiz.question_count }} questions
+          {% if quiz.time_limit_seconds %}· timed{% endif %}
+        </div>
+      </div>
+      <div class="btn-row">
+        {% with b=best|get_item:quiz.id %}
+          {% if b is not None %}<span class="badge {% if b >= 70 %}emerald{% else %}amber{% endif %}">best {{ b }}%</span>{% endif %}
+        {% endwith %}
+        <a class="btn primary" href="{% url 'quiz_take' quiz.slug %}">Start</a>
+      </div>
+    </div>
+  </div>
+{% empty %}
+  <div class="empty">No exams loaded yet. Run <code>python manage.py seed_content</code>.</div>
+{% endfor %}
+{% endblock %}

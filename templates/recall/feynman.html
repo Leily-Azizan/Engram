@@ -1,0 +1,47 @@
+{% extends 'base.html' %}
+{% block title %}Explain it back · Engram{% endblock %}
+{% block topbar %}Explain it back{% endblock %}
+{% block content %}
+<h1>🗣️ Feynman: explain it back</h1>
+<p class="subtitle">Teach the idea in plain words, as if to a beginner. Gaps in your explanation = gaps in your understanding.</p>
+
+{% if featured %}
+<div class="card">
+  <div class="muted" style="font-size:13px;">
+    <a href="{{ featured.lesson.get_absolute_url }}">{{ featured.lesson.chapter.course.name }} · {{ featured.lesson.title }}</a>
+  </div>
+  <h3 style="margin-top:6px;">{{ featured.prompt }}</h3>
+  <form method="post" action="{% url 'feynman_save' %}">
+    {% csrf_token %}
+    <input type="hidden" name="prompt_id" value="{{ featured.id }}">
+    <textarea name="text" placeholder="Explain it simply, in your own words…"></textarea>
+    <div class="form-row" style="max-width:220px; margin-top:10px;">
+      <label>How confident are you? (1–5)</label>
+      <select name="confidence">
+        <option value="1">1 · shaky</option>
+        <option value="2">2</option>
+        <option value="3" selected>3 · ok</option>
+        <option value="4">4</option>
+        <option value="5">5 · rock solid</option>
+      </select>
+    </div>
+    <div class="btn-row"><button class="btn primary" type="submit">Save explanation</button></div>
+  </form>
+</div>
+{% else %}
+<div class="card empty">No Feynman prompts available yet.</div>
+{% endif %}
+
+{% if attempts %}
+<div class="card">
+  <h3>Your recent explanations</h3>
+  {% for a in attempts %}
+    <div style="border-bottom:1px solid var(--line); padding:10px 0;">
+      <div class="muted" style="font-size:13px;">{{ a.prompt.lesson.title }} · confidence {{ a.confidence }}/5 · {{ a.created_at|date:"M j" }}</div>
+      <div style="font-weight:600; margin:4px 0;">{{ a.prompt.prompt }}</div>
+      <div class="prose">{{ a.text_html|safe }}</div>
+    </div>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

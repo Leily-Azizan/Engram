@@ -1,0 +1,24 @@
+{% extends 'base.html' %}
+{% block title %}Courses · Engram{% endblock %}
+{% block topbar %}Courses{% endblock %}
+{% block content %}
+<h1>📚 Courses</h1>
+<p class="subtitle">Pick a track. Work through chapters in order, or jump to what you need.</p>
+
+<form method="get" action="{% url 'search' %}" class="form-row" style="max-width:480px;">
+  <input type="text" name="q" placeholder="🔎 Search all topics & commands (e.g. subnetting, chmod)…">
+</form>
+
+<div class="grid cols-2">
+  {% for row in courses_progress %}
+    <a href="{{ row.course.get_absolute_url }}" class="card" style="display:block;">
+      <h3>{{ row.course.icon }} {{ row.course.name }}</h3>
+      <p class="muted">{{ row.course.description|truncatewords:24 }}</p>
+      <div class="bar good"><span style="width:{{ row.progress.pct }}%"></span></div>
+      <div class="muted" style="font-size:13px; margin-top:6px;">{{ row.progress.learned }}/{{ row.progress.total }} lessons learned · {{ row.progress.pct }}%</div>
+    </a>
+  {% empty %}
+    <div class="empty">No courses loaded yet. Run <code>python manage.py seed_content</code>.</div>
+  {% endfor %}
+</div>
+{% endblock %}

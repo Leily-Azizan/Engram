@@ -1,0 +1,166 @@
+chapter:
+  title: "Remotes and Collaboration"
+  slug: remotes-collaboration
+  order: 3
+  summary: "Push and pull with remote repositories, and understand remote-tracking branches."
+
+lessons:
+  - title: "Working with remotes"
+    slug: working-with-remotes
+    order: 1
+    est_minutes: 22
+    summary: "clone, fetch, pull, push, and how local tracks remote."
+    body: |
+      ## Connecting to a remote
+
+      A **remote** is another copy of the repo (e.g. on GitHub). `origin` is the
+      conventional name for the one you cloned from.
+
+      ```bash
+      git clone git@github.com:leily/app.git   # copy a remote repo locally
+      git remote -v                            # list remotes
+      git remote add origin <url>              # add one to an existing repo
+      ```
+
+      ## The sync commands
+
+      ```bash
+      git fetch                # download remote changes, DON'T merge
+      git pull                 # fetch + merge into your current branch
+      git push                 # upload your commits to the remote
+      git push -u origin main  # first push: set upstream tracking
+      ```
+
+      **fetch vs pull:** `fetch` updates your knowledge of the remote without
+      touching your working branch; `pull` fetches *and* integrates. Fetch-then-
+      review is safer than blindly pulling.
+
+      ## Typical collaboration loop
+
+      ```bash
+      git switch -c feature/x
+      # ...commit work...
+      git push -u origin feature/x   # push the branch
+      # open a Pull Request on the host, get review, merge
+      git switch main && git pull    # update local main
+      ```
+    deep_dive: |
+      ### Remote-tracking branches and refspecs
+
+      When you clone, Git copies all the objects (the content-addressed
+      blobs/trees/commits from the Git course chapter 1) and sets up a **remote**.
+      It then creates **remote-tracking branches** like `origin/main` — local,
+      read-only bookmarks that record *where the remote's branches were the last
+      time you talked to it*. They live under `.git/refs/remotes/origin/`.
+
+      So at any moment you have up to three relevant pointers for `main`:
+      - `main` — your local branch.
+      - `origin/main` — your *cached* view of the remote's main (only updated by
+        fetch/pull/push).
+      - the actual remote's main — out on the server, which you can't see until you
+        fetch.
+
+      **`git fetch`** contacts the remote, downloads any objects you're missing, and
+      moves `origin/main` to match the server — **without touching your `main` or
+      working tree**. That's why fetch is always safe. **`git pull`** is just
+      `fetch` followed by an integration of `origin/main` into `main` (a merge by
+      default, or a rebase with `pull --rebase`). Knowing this, "I pulled and got a
+      surprise merge/conflict" becomes obvious — pull *integrates*.
+
+      **Refspecs** are the mapping that says which remote refs sync to which local
+      refs, e.g. `+refs/heads/*:refs/remotes/origin/*` ("all remote branches →
+      origin/*"). `git push origin main` is shorthand for a refspec
+      `main:main` ("send my main to their main"). Push only succeeds if it's a
+      **fast-forward** of the remote branch — i.e. your history *includes* theirs.
+      If someone else pushed first, your push is **rejected** ("non-fast-forward");
+      the fix is to fetch + integrate their work, then push. (Force-pushing
+      overrides this and rewrites the remote's history — dangerous on shared
+      branches, fine on your own feature branch.)
+
+      Efficiency note: push/fetch negotiate which **objects** are missing by digest
+      and transfer only those (packed), exactly like Docker layer dedup — both are
+      content-addressed stores, so they never re-send what the other end already
+      has.
+    cards:
+      - front: "What is a remote-tracking branch like origin/main?"
+        back: "A local, read-only bookmark of where the remote's branch was at your last fetch/pull/push. It only updates when you communicate with the remote."
+      - front: "fetch vs pull?"
+        back: "`fetch` downloads remote changes and updates origin/* without touching your branch/working tree (safe). `pull` = fetch + integrate (merge or rebase) into your current branch."
+      - front: "Why is a push sometimes rejected as 'non-fast-forward'?"
+        back: "The remote branch has commits you don't have, so your push isn't a fast-forward. Fetch + integrate their work first, then push (or force-push to overwrite — only safe on your own branch)."
+      - front: "What does `git push -u origin main` do beyond pushing?"
+        back: "Sets the upstream (tracking) link so future `git push`/`git pull` know which remote branch `main` corresponds to."
+      - cloze: "`git {{c1::fetch}}` updates origin/main without merging; `git {{c2::pull}}` fetches and then integrates it into your branch."
+    feynman:
+      - "Explain the three versions of 'main' you can have and how they get out of sync."
+      - "Why is fetch-then-review safer than pull?"
+    labs:
+      - title: "Simulate a rejected push"
+        slug: lab-non-fast-forward
+        difficulty: core
+        est_minutes: 20
+        scenario: |
+          You'll reproduce the 'updates were rejected' situation everyone hits, and
+          fix it the right way.
+        deliverable: |
+          1. Describe the sequence where teammate B pushes to origin/main after you
+             last fetched, then you try to push.
+          2. Explain why Git rejects your push.
+          3. Give the correct recovery commands (fetch + integrate + push), without
+             force-pushing.
+          4. Say when a force-push WOULD be acceptable.
+        hints: |
+          - `git pull --rebase` or `git fetch` + `git merge origin/main`
+        solution: |
+          Sequence: you `fetch`, B pushes, you commit, you `push` → rejected
+          (non-fast-forward) because origin/main now has B's commit you lack.
+          ```bash
+          git fetch origin
+          git rebase origin/main      # (or: git merge origin/main) replay your work on top
+          git push                    # now a fast-forward -> accepted
+          ```
+          Force-push (`--force-with-lease`) is acceptable only on **your own**
+          feature branch that no one else is building on.
+
+quiz:
+  title: "Remotes & Collaboration — chapter exam"
+  slug: git-remotes-exam
+  scope: chapter
+  description: "Clone/fetch/pull/push and tracking branches."
+  questions:
+    - type: mcq
+      text: "What does `git fetch` do?"
+      explanation: "Downloads remote changes and updates origin/* without merging into your branch."
+      choices:
+        - {text: "Downloads remote changes without merging them", correct: true}
+        - {text: "Uploads your commits"}
+        - {text: "Merges remote into your branch"}
+        - {text: "Deletes remote-tracking branches"}
+    - type: mcq
+      text: "`git pull` is equivalent to which two commands?"
+      explanation: "fetch then integrate (merge or rebase)."
+      choices:
+        - {text: "git fetch + git merge (or rebase)", correct: true}
+        - {text: "git add + git commit"}
+        - {text: "git push + git tag"}
+        - {text: "git clone + git checkout"}
+    - type: command
+      text: "Push the current branch 'main' and set its upstream tracking on origin."
+      explanation: "`git push -u origin main`."
+      answers:
+        - {value: "git push -u origin main", match: exact}
+        - {value: "git push --set-upstream origin main", match: exact}
+    - type: true_false
+      text: "origin/main always reflects the live state of the remote in real time."
+      explanation: "False — it's a cached bookmark updated only on fetch/pull/push."
+      choices:
+        - {text: "True"}
+        - {text: "False", correct: true}
+    - type: mcq
+      text: "Your push is rejected as non-fast-forward. Best fix (shared branch)?"
+      explanation: "Integrate the remote's new commits first, then push."
+      choices:
+        - {text: "Fetch and merge/rebase their commits, then push", correct: true}
+        - {text: "Force-push over their work"}
+        - {text: "Delete the remote branch"}
+        - {text: "Re-clone the repo"}

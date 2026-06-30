@@ -1,0 +1,48 @@
+{% extends 'base.html' %}
+{% block title %}Today's session · Engram{% endblock %}
+{% block topbar %}Today's session{% endblock %}
+{% block content %}
+<h1>🎯 Today's interleaved session</h1>
+<p class="subtitle">Mixing recall, testing, and building in one sitting (interleaving) beats doing one kind of practice at a time. Work top to bottom.</p>
+
+<div class="card">
+  <h3>1 · Recall warm-up <span class="badge brand">spaced repetition</span></h3>
+  <p class="muted">Clear your due flashcards first — this is what moves knowledge into long-term memory.</p>
+  <div class="btn-row">
+    <a class="btn primary" href="{% url 'review' %}">Review {{ review_counts.due }} due{% if review_counts.new %} (+{{ review_counts.new }} new){% endif %}</a>
+    <a class="btn" href="{% url 'feynman' %}">Explain a concept (Feynman)</a>
+  </div>
+</div>
+
+<div class="card">
+  <h3>2 · Test yourself <span class="badge brand">active recall</span></h3>
+  {% if quiz %}
+    <p>Take: <a href="{{ quiz.get_absolute_url }}"><strong>{{ quiz.title }}</strong></a>
+      <span class="muted">· {{ quiz.question_count }} questions</span></p>
+    <a class="btn" href="{% url 'quiz_take' quiz.slug %}">Start quiz</a>
+  {% else %}
+    <p class="muted">No quizzes available yet.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h3>3 · Build it <span class="badge brand">think like an engineer</span></h3>
+  {% if lab %}
+    <p>Lab: <a href="{{ lab.get_absolute_url }}"><strong>{{ lab.title }}</strong></a>
+      <span class="tag-diff {{ lab.difficulty }}">{{ lab.get_difficulty_display }}</span>
+      <span class="muted">· ~{{ lab.est_minutes }} min</span></p>
+    <p class="muted">{{ lab.scenario_md|truncatewords:30 }}</p>
+    <a class="btn good" href="{{ lab.get_absolute_url }}">Open lab</a>
+  {% else %}
+    <p class="muted">No labs available yet.</p>
+  {% endif %}
+</div>
+
+{% if next_lesson %}
+<div class="card">
+  <h3>4 · Learn something new</h3>
+  <p>Next lesson: <a href="{{ next_lesson.get_absolute_url }}"><strong>{{ next_lesson.title }}</strong></a></p>
+  <div class="muted" style="font-size:13px;">{{ next_lesson.chapter.course.name }} · {{ next_lesson.chapter.title }}</div>
+</div>
+{% endif %}
+{% endblock %}

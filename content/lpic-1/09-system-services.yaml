@@ -1,0 +1,228 @@
+chapter:
+  title: "Essential System Services"
+  slug: system-services
+  order: 9
+  summary: "Keep time in sync, manage logs with systemd-journald and syslog, and understand mail/print basics."
+
+lessons:
+  - title: "System logging and time"
+    slug: logging-and-time
+    order: 1
+    est_minutes: 24
+    summary: "journalctl, the syslog facilities/severities, log rotation, and NTP."
+    body: |
+      ## Two logging worlds
+
+      Modern systems run **systemd-journald** (binary journal) often alongside a
+      classic **syslog** daemon (rsyslog) writing text files in `/var/log`.
+
+      ### Reading the journal
+
+      ```bash
+      journalctl -u nginx              # logs for one unit
+      journalctl -u nginx -f           # follow live
+      journalctl --since "1 hour ago"  # time filter
+      journalctl -p err -b             # only errors, this boot
+      journalctl --disk-usage          # how big the journal is
+      ```
+
+      ### Classic log files
+
+      ```
+      /var/log/syslog      general system messages (Debian)
+      /var/log/messages    general messages (RHEL)
+      /var/log/auth.log    authentication / sudo (Debian)
+      /var/log/secure      authentication (RHEL)
+      ```
+
+      Syslog classifies each message by **facility** (auth, cron, kern, mail…)
+      and **severity** (emerg=0 … debug=7).
+
+      ### Log rotation
+
+      `logrotate` (config in `/etc/logrotate.conf` and `/etc/logrotate.d/`)
+      compresses and prunes old logs so disks don't fill.
+
+      ## Keeping time in sync (NTP)
+
+      Accurate clocks matter for logs, TLS, and auth. On systemd:
+
+      ```bash
+      timedatectl                      # shows "NTP service: active"
+      timedatectl set-ntp true         # enable network time sync
+      ```
+    deep_dive: |
+      ### Why journald is binary and how syslog priorities work
+
+      **journald captures more because it sits at the source.** A systemd service's
+      stdout/stderr are wired straight to the journal socket, so journald records
+      each line *with trusted metadata it adds itself* — the originating unit, PID,
+      UID, boot ID, and a monotonic timestamp — that a program writing plain text
+      could lie about or omit. Storing this as an indexed **binary** file is what
+      makes `journalctl -u nginx -p err` a fast field query rather than a `grep`
+      over gigabytes; the trade-off is you need `journalctl` to read it.
+
+      **Syslog encodes priority as one number.** The classic protocol tags every
+      message with a **facility** (which subsystem: `auth`, `cron`, `kern`,
+      `mail`…) and a **severity** (`emerg`=0 … `debug`=7), combined into a single
+      priority value `facility × 8 + severity`. rsyslog routes on those: that's how
+      auth messages land in `/var/log/auth.log` while kernel messages go elsewhere,
+      all from one stream.
+
+      **logrotate and the reopen problem.** A daemon holds its logfile by open *fd*,
+      so renaming `app.log` to `app.log.1` doesn't redirect its writes — it keeps
+      filling the renamed inode (recall: the name is just a pointer). logrotate
+      therefore either signals the daemon (often `SIGHUP`) to **reopen** its file,
+      or uses `copytruncate` to copy-then-zero the original in place. Get this wrong
+      and "rotated" logs keep growing invisibly.
+    cards:
+      - front: "How do you view and follow the logs of a single systemd unit?"
+        back: "`journalctl -u <unit> -f` (`-u` selects the unit, `-f` follows live)."
+      - front: "What are syslog 'facility' and 'severity'?"
+        back: "Facility = message source/category (auth, cron, kern, mail…); severity = importance from emerg(0) to debug(7)."
+      - front: "What does logrotate do and where is it configured?"
+        back: "Rotates, compresses, and prunes log files so disks don't fill — configured in `/etc/logrotate.conf` and `/etc/logrotate.d/`."
+      - cloze: "On systemd, the binary log service is `{{c1::journald}}` (read with `{{c2::journalctl}}`), and network time sync is enabled with `timedatectl set-ntp {{c3::true}}`."
+    feynman:
+      - "Explain why accurate time (NTP) matters for security logs and TLS."
+      - "Compare journald and rsyslog — why might a server run both?"
+    labs:
+      - title: "Investigate a failing service"
+        slug: lab-investigate-service
+        difficulty: core
+        est_minutes: 20
+        scenario: |
+          A service keeps restarting. You must gather evidence from the logs and
+          confirm the clock is trustworthy before blaming anything.
+        deliverable: |
+          1. Show the last 50 log lines for a unit of your choice.
+          2. Show only the errors from the current boot.
+          3. Confirm NTP sync is active and the timezone is correct.
+        hints: |
+          - `journalctl -u <unit> -n 50`
+          - `journalctl -p err -b`
+          - `timedatectl`
+        solution: |
+          ```bash
+          journalctl -u ssh -n 50
+          journalctl -p err -b
+          timedatectl              # check "System clock synchronized: yes"
+          ```
+
+  - title: "Mail and printing basics"
+    slug: mail-and-printing
+    order: 2
+    est_minutes: 14
+    summary: "The MTA concept and the CUPS print stack at a high level."
+    body: |
+      ## Mail Transfer Agents (MTAs)
+
+      An **MTA** moves email between servers using **SMTP**. Common ones:
+      **Postfix** (popular), **Sendmail**, **Exim**. Locally, the `mail` command
+      and the MTA deliver to mailboxes (often `/var/mail/<user>`).
+
+      ```bash
+      echo "body" | mail -s "subject" leily   # send local mail
+      mailq                                    # view the mail queue
+      ```
+
+      `newaliases` rebuilds `/etc/aliases` (e.g. forward root's mail to you).
+
+      ## Printing with CUPS
+
+      **CUPS** (Common Unix Printing System) is the print server; it speaks
+      **IPP** and has a web UI on `http://localhost:631`.
+
+      ```bash
+      lpstat -p -d        # printers and the default
+      lp -d printer file  # print a file
+      lpq                 # print queue
+      lprm 4              # cancel job 4
+      ```
+    deep_dive: |
+      ### Store-and-forward mail and the CUPS pipeline
+
+      **SMTP is store-and-forward, not a live transfer.** When you submit a
+      message, the MTA writes it to an on-disk **queue** and *then* tries to deliver
+      — so if the next hop is down, it retries on a backoff schedule for days
+      rather than failing outright (`mailq` shows what's waiting). Where to send it
+      comes from DNS **MX records** for the recipient's domain, which is the bridge
+      between this chapter and DNS. For a local user the MTA hands off to a local
+      delivery agent that appends to `/var/mail/<user>` (mbox) or a Maildir, after
+      consulting `/etc/aliases` and `~/.forward` to redirect or fan out addresses.
+
+      **CUPS is a tiny web server that transforms documents.** The CUPS daemon
+      speaks **IPP** layered over HTTP (hence the admin UI on port 631) and keeps a
+      per-printer spool queue just like mail. The interesting part is the **filter
+      chain**: your PDF or text is pushed through a series of filters that convert
+      it step by step into the printer's own language, guided by a PPD or — on
+      modern "driverless" IPP printers — by capabilities the printer advertises
+      itself. `lp` enqueues a job, `lpstat`/`lpq` inspect the spool, and `lprm`
+      pulls a job back out before it prints.
+    cards:
+      - front: "What protocol do MTAs use to transfer mail between servers?"
+        back: "SMTP. Common MTAs: Postfix, Sendmail, Exim."
+      - front: "What is CUPS and what port/UI does it expose?"
+        back: "The Common Unix Printing System (print server); web UI on port 631, speaks IPP."
+      - cloze: "`{{c1::lpstat}} -p -d` lists printers and the default, and `{{c2::lpq}}` shows the print queue."
+    feynman:
+      - "Describe the path an email takes from your `mail` command to a remote inbox."
+    labs:
+      - title: "Map the local mail + print tools"
+        slug: lab-mail-print-tools
+        difficulty: intro
+        est_minutes: 10
+        scenario: |
+          You want a quick reference for inspecting mail and print state on a box.
+        deliverable: |
+          List the command to: (1) view the mail queue, (2) list printers and the
+          default, (3) view the print queue, (4) cancel a print job.
+        hints: |
+          - `mailq`, `lpstat`, `lpq`, `lprm`
+        solution: |
+          ```bash
+          mailq                 # mail queue
+          lpstat -p -d          # printers + default
+          lpq                   # print queue
+          lprm <job-id>         # cancel a job
+          ```
+
+quiz:
+  title: "Essential System Services — chapter exam"
+  slug: lpic1-system-services-exam
+  scope: chapter
+  description: "Logging, time, mail, and printing."
+  questions:
+    - type: command
+      text: "Follow the live logs of the systemd unit named nginx."
+      explanation: "`journalctl -u nginx -f`."
+      answers:
+        - "journalctl -u nginx -f"
+        - {value: "journalctl -f -u nginx", match: exact}
+    - type: mcq
+      text: "Which protocol do mail servers use to relay email to each other?"
+      explanation: "SMTP is the mail transfer protocol."
+      choices:
+        - {text: "SMTP", correct: true}
+        - {text: "IMAP"}
+        - {text: "SNMP"}
+        - {text: "HTTP"}
+    - type: mcq
+      text: "What is the job of logrotate?"
+      explanation: "It compresses and prunes old log files so disks don't fill."
+      choices:
+        - {text: "Rotate/compress/prune log files", correct: true}
+        - {text: "Encrypt logs"}
+        - {text: "Forward logs to email"}
+        - {text: "Sync the clock"}
+    - type: command
+      text: "Enable automatic network time synchronization (systemd)."
+      explanation: "`timedatectl set-ntp true`."
+      answers:
+        - {value: "(sudo )?timedatectl set-ntp (true|on)", match: regex}
+    - type: true_false
+      text: "CUPS exposes a web interface on port 631."
+      explanation: "True — http://localhost:631."
+      choices:
+        - {text: "True", correct: true}
+        - {text: "False"}

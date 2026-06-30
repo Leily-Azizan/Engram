@@ -1,0 +1,265 @@
+chapter:
+  title: "Security"
+  slug: security
+  order: 11
+  summary: "Host security essentials: privilege with sudo, securing SSH, special permission bits, and finding risky files."
+
+lessons:
+  - title: "Privileges, sudo, and special permission bits"
+    slug: privileges-and-special-bits
+    order: 1
+    est_minutes: 24
+    summary: "Least privilege with sudo, plus SUID/SGID/sticky bits and how to find them."
+    body: |
+      ## Least privilege with sudo
+
+      Don't log in as root — grant specific privilege with **sudo**, which logs
+      every command. Configure it safely with **`visudo`** (it checks syntax
+      before saving):
+
+      ```bash
+      sudo visudo
+      # examples inside the file:
+      # %sudo   ALL=(ALL:ALL) ALL          # members of group 'sudo' can do all
+      # leily   ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart nginx
+      ```
+
+      Drop files in `/etc/sudoers.d/` instead of editing the main file.
+
+      ## Special permission bits
+
+      Beyond rwx, three special bits change behaviour:
+
+      | Bit | Octal | On a file | On a directory |
+      |-----|-------|-----------|----------------|
+      | SUID | 4000 | run as the file's **owner** | — |
+      | SGID | 2000 | run as the file's **group** | new files inherit the dir's group |
+      | Sticky | 1000 | — | only the **owner** of a file can delete it |
+
+      Classic examples: `/usr/bin/passwd` is **SUID root** (lets a user update
+      `/etc/shadow`); `/tmp` is **sticky** (`drwxrwxrwt`) so users can't delete
+      each other's files.
+
+      ```bash
+      chmod u+s file        # set SUID
+      chmod g+s dir         # set SGID
+      chmod +t dir          # set sticky bit
+      ```
+
+      In `ls -l`, an `s` replaces `x` for SUID/SGID, and `t` for sticky.
+    deep_dive: |
+      ### How SUID actually escalates privilege
+
+      Every process has **three** user IDs: the **real UID** (who launched it), the
+      **effective UID** (what permission checks actually use), and the saved UID.
+      Normally all three are you.
+
+      When you `exec()` a binary with the **SUID bit** set, the kernel sets the new
+      process's **effective UID to the file's owner** (e.g. root) at exec time,
+      while the real UID stays as you. So the program runs with the owner's
+      authority. That's the whole mechanism behind `/usr/bin/passwd`: it's owned by
+      root with SUID, so running it makes your effective UID root *just long enough*
+      for passwd's own carefully written code to edit `/etc/shadow` on your behalf —
+      you never get a root shell, only passwd's narrow behaviour.
+
+      **Why this is risky.** Every SUID-root binary is a potential
+      privilege-escalation path: a bug in it runs as root. Hardening therefore
+      means *auditing* them (`find / -perm -4000`). Note Linux **ignores SUID on
+      interpreted scripts** — it would create an interpreter-injection race — so
+      only compiled binaries honour it.
+
+      **The other two bits at the kernel level.** **SGID on a directory** makes new
+      files inherit the directory's group (how shared project folders stay
+      consistent). **The sticky bit** changes one rule in the kernel's unlink
+      check: in a sticky directory you may only delete entries you own — which is
+      what makes a world-writable `/tmp` safe to share.
+    cards:
+      - front: "Why edit the sudoers file with `visudo` instead of a normal editor?"
+        back: "`visudo` validates the syntax before saving — a broken sudoers file can lock everyone out of sudo."
+      - front: "What does the SUID bit do on an executable?"
+        back: "It runs with the privileges of the file's *owner* (often root), not the user who launched it — e.g. `/usr/bin/passwd`."
+      - front: "What does the sticky bit do on a directory like /tmp?"
+        back: "Restricts deletion: only a file's owner (or root) can delete it, even though the directory is world-writable."
+      - cloze: "SUID octal is `{{c1::4000}}`, SGID is `{{c2::2000}}`, and the sticky bit is `{{c3::1000}}`."
+      - cloze: "In `ls -l`, the SUID bit shows as an `{{c1::s}}` in the owner's execute slot, and the sticky bit shows as a `{{c2::t}}` for others."
+    feynman:
+      - "Explain how `passwd` lets an unprivileged user change a root-owned file safely (SUID)."
+      - "Why is the sticky bit essential for a shared /tmp?"
+    labs:
+      - title: "Audit privileged binaries"
+        slug: lab-audit-suid
+        difficulty: challenge
+        est_minutes: 22
+        scenario: |
+          Part of hardening a host is knowing which binaries can escalate
+          privilege. You need to inventory SUID files and grant one teammate a
+          single, password-less sudo command.
+        deliverable: |
+          1. Find all SUID files on the system.
+          2. Find all SGID files.
+          3. Confirm `/tmp` has the sticky bit.
+          4. Write the sudoers line letting user `sara` run *only*
+             `systemctl restart nginx` without a password.
+        hints: |
+          - `find / -perm -4000` (SUID), `-perm -2000` (SGID)
+          - `ls -ld /tmp` → look for `t`
+          - Edit via `sudo visudo -f /etc/sudoers.d/sara`
+        solution: |
+          ```bash
+          sudo find / -perm -4000 -type f 2>/dev/null   # SUID
+          sudo find / -perm -2000 -type f 2>/dev/null   # SGID
+          ls -ld /tmp                                    # drwxrwxrwt -> sticky
+          # in /etc/sudoers.d/sara (via visudo):
+          # sara ALL=(root) NOPASSWD: /usr/bin/systemctl restart nginx
+          ```
+
+  - title: "Secure remote access (SSH and keys)"
+    slug: secure-ssh
+    order: 2
+    est_minutes: 22
+    summary: "Key-based auth, hardening sshd, and the basics of GPG."
+    body: |
+      ## SSH key authentication
+
+      Keys beat passwords: no secret travels, and you can't brute-force them.
+
+      ```bash
+      ssh-keygen -t ed25519 -C "leily@laptop"   # generate a keypair
+      ssh-copy-id leily@server                   # install your PUBLIC key there
+      ssh leily@server                           # now logs in with the key
+      ```
+
+      Your **private** key (`~/.ssh/id_ed25519`) must be `600` and never leaves
+      your machine; the **public** key goes in the server's
+      `~/.ssh/authorized_keys`.
+
+      ## Hardening sshd
+
+      In `/etc/ssh/sshd_config`, then `sudo systemctl restart ssh`:
+
+      ```
+      PermitRootLogin no
+      PasswordAuthentication no     # keys only
+      ```
+
+      ## GPG in one minute
+
+      **GPG** does encryption and signing with a public/private keypair:
+
+      ```bash
+      gpg --gen-key
+      gpg --encrypt --recipient leily file     # only her private key can open it
+      gpg --decrypt file.gpg
+      gpg --verify release.tar.gz.sig          # check a signature
+      ```
+    deep_dive: |
+      ### What actually crosses the wire in an SSH login
+
+      **Key auth proves possession without sending the secret.** The server takes
+      your public key from `authorized_keys` and issues a random **challenge**; your
+      client signs it with the **private** key, and the server verifies the
+      signature with the public key. The private key never leaves your machine and
+      nothing reusable travels the network — which is why keys resist both
+      sniffing and brute force in a way passwords can't. (sshd refuses a private key
+      that isn't `600` precisely because a readable key defeats this whole model.)
+
+      **Asymmetric crypto only bootstraps; the session is symmetric.** Public-key
+      operations are slow, so the handshake first runs a **Diffie–Hellman** exchange
+      to derive a shared secret over the open channel, and all bulk traffic is then
+      encrypted with a fast symmetric cipher (AES/ChaCha20). Public keys authenticate
+      *who*; symmetric keys protect the *data*.
+
+      **Host keys stop the man-in-the-middle.** On first connect SSH shows the
+      server's host-key fingerprint and pins it in `~/.ssh/known_hosts`
+      (trust-on-first-use). If a later connection presents a different key — a sign
+      someone may be intercepting — SSH refuses loudly. `ssh-agent` holds your
+      decrypted private key in memory so you unlock it once per session. GPG uses the
+      same public/private mechanics for files: encrypt to someone's public key so
+      only their private key opens it, or sign with yours so others can verify it
+      came from you and wasn't altered.
+    cards:
+      - front: "Which SSH key do you copy to the server, and which never leaves your machine?"
+        back: "Copy the *public* key (into `authorized_keys`); the *private* key stays local and must be mode 600."
+      - front: "Name two sshd_config settings that harden a server."
+        back: "`PermitRootLogin no` and `PasswordAuthentication no` (force key-based auth, no direct root login)."
+      - front: "What two things does GPG provide with its keypair?"
+        back: "Encryption (only the holder of the private key can decrypt) and signing/verification (prove authorship/integrity)."
+      - cloze: "Generate a modern SSH key with `ssh-keygen -t {{c1::ed25519}}`, and install your public key with `ssh-{{c2::copy-id}} user@host`."
+    feynman:
+      - "Explain why key-based SSH is more secure than passwords."
+      - "Describe what `PasswordAuthentication no` protects against."
+    labs:
+      - title: "Lock down SSH access"
+        slug: lab-harden-ssh
+        difficulty: core
+        est_minutes: 20
+        scenario: |
+          A new server currently allows root login with a password — a magnet for
+          bots. Convert it to key-only access for your user.
+        deliverable: |
+          1. Generate an ed25519 keypair (if you don't have one).
+          2. Install your public key on the server.
+          3. List the two sshd_config changes that disable root login and
+             password auth.
+          4. State the correct permissions for the private key and for
+             `~/.ssh/authorized_keys`.
+        hints: |
+          - `ssh-keygen -t ed25519`, `ssh-copy-id`
+          - private key 600; authorized_keys 600; ~/.ssh 700
+        solution: |
+          ```bash
+          ssh-keygen -t ed25519 -C "leily@laptop"
+          ssh-copy-id leily@server
+          # in /etc/ssh/sshd_config:
+          #   PermitRootLogin no
+          #   PasswordAuthentication no
+          sudo systemctl restart ssh
+          # perms: ~/.ssh = 700, private key = 600, authorized_keys = 600
+          ```
+
+quiz:
+  title: "Security — chapter exam"
+  slug: lpic1-security-exam
+  scope: chapter
+  description: "sudo, special bits, and SSH/GPG."
+  questions:
+    - type: mcq
+      text: "What does the SUID bit do on an executable?"
+      explanation: "It runs with the owner's privileges (often root), e.g. /usr/bin/passwd."
+      choices:
+        - {text: "Runs with the file owner's privileges", correct: true}
+        - {text: "Makes the file read-only"}
+        - {text: "Prevents deletion"}
+        - {text: "Runs with the caller's group"}
+    - type: command
+      text: "Find all SUID files on the system (search from /)."
+      explanation: "`find / -perm -4000` matches the SUID bit."
+      answers:
+        - {value: "(sudo )?find / -perm -4000( -type f)?( 2>/dev/null)?", match: regex}
+    - type: mcq
+      text: "Which sshd_config setting forces key-based login by disabling passwords?"
+      explanation: "`PasswordAuthentication no` disables password auth."
+      choices:
+        - {text: "PasswordAuthentication no", correct: true}
+        - {text: "PermitEmptyPasswords yes"}
+        - {text: "X11Forwarding yes"}
+        - {text: "Port 22"}
+    - type: true_false
+      text: "You should edit /etc/sudoers directly with nano to avoid extra tools."
+      explanation: "False — use `visudo`, which validates syntax and prevents lockouts."
+      choices:
+        - {text: "True"}
+        - {text: "False", correct: true}
+    - type: mcq
+      text: "Which SSH key goes into the server's authorized_keys file?"
+      explanation: "The public key; the private key never leaves your machine."
+      choices:
+        - {text: "The public key", correct: true}
+        - {text: "The private key"}
+        - {text: "Both keys"}
+        - {text: "The host key"}
+    - type: command
+      text: "Generate an ed25519 SSH keypair."
+      explanation: "`ssh-keygen -t ed25519`."
+      answers:
+        - {value: "ssh-keygen -t ed25519.*", match: regex}

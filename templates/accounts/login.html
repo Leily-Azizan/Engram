@@ -1,0 +1,23 @@
+{% extends 'base.html' %}
+{% block title %}Sign in · Engram{% endblock %}
+{% block content_anon %}
+<div style="min-height:100vh; display:flex; align-items:center; justify-content:center; background:var(--bg);">
+  <div class="card" style="width:360px;">
+    <div class="brand" style="color:var(--ink); padding-left:0;"><span class="logo">🧭</span> Engram</div>
+    <p class="subtitle">Your DevOps learning companion.</p>
+    {% if form.errors %}<div class="flash-msg" style="background:#fee2e2;color:#dc2626;">Wrong username or password.</div>{% endif %}
+    <form method="post">
+      {% csrf_token %}
+      <div class="form-row">
+        <label for="id_username">Username</label>
+        {{ form.username }}
+      </div>
+      <div class="form-row">
+        <label for="id_password">Password</label>
+        {{ form.password }}
+      </div>
+      <button class="btn primary" type="submit" style="width:100%; justify-content:center;">Sign in</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

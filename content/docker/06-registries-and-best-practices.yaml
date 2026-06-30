@@ -1,0 +1,267 @@
+chapter:
+  title: "Registries and Best Practices"
+  slug: registries-and-best-practices
+  order: 6
+  summary: "Tag, push, and pull images via registries, and run containers safely in production."
+
+lessons:
+  - title: "Registries, tags and digests"
+    slug: registries-tags-digests
+    order: 1
+    est_minutes: 18
+    summary: "Where images are stored and shared, and how to name them precisely."
+    body: |
+      ## Registries store and distribute images
+
+      A **registry** (Docker Hub, GitHub GHCR, GitLab, ECR, etc.) holds
+      **repositories** of tagged images. The full name is:
+
+      ```
+      registry/namespace/repository:tag
+      ghcr.io/leily/myapp:1.2.0
+      docker.io/library/nginx:latest      # 'docker.io/library/' is implied for official images
+      ```
+
+      ## Push and pull
+
+      ```bash
+      docker login ghcr.io
+      docker tag myapp:1.0 ghcr.io/leily/myapp:1.0
+      docker push ghcr.io/leily/myapp:1.0
+      docker pull ghcr.io/leily/myapp:1.0
+      ```
+
+      ## Tags are mutable; digests are not
+
+      A tag like `:1.0` or `:latest` is a **movable label** — someone can re-push
+      it to point at different bytes. For anything you must reproduce, pin the
+      **digest**:
+
+      ```bash
+      docker pull nginx@sha256:abc123...   # exact, immutable image
+      ```
+
+      Avoid relying on `:latest` in production — it silently changes. Use explicit,
+      immutable version tags (or digests).
+    deep_dive: |
+      ### What's actually transferred: manifests and content-addressed layers
+
+      When you `docker push`, you are **not** uploading one big blob. The registry
+      protocol (the OCI Distribution spec) transfers two kinds of objects, all
+      addressed by **sha256 digest** (content-addressable storage):
+
+      1. **Layer blobs** — each layer is a gzipped tarball named by its digest.
+         Before uploading a layer, the client asks the registry "do you already
+         have sha256:X?"; if yes it's **skipped**. This is why pushing a new image
+         version that only changed the top layer uploads almost nothing, and why
+         many images built on `python:3.12-slim` share its base layers in the
+         registry too.
+      2. **A manifest** — a small JSON listing the image's config blob + the
+         ordered digests of its layers. The manifest itself has a digest: that
+         `sha256:...` *is* the image's immutable identity. A **tag** is just a
+         human-friendly pointer to a manifest digest stored in the repo.
+
+      So `nginx:1.25` and `nginx@sha256:abc…` can name the same image today, but
+      the tag can be re-pointed tomorrow while the digest can never change — pulling
+      by digest guarantees byte-identical content. CI/CD systems exploit this: they
+      build, push by tag, capture the resulting **digest**, and deploy *that
+      digest* so what runs in prod is exactly what was tested.
+
+      **Multi-arch images** use a **manifest list** (a manifest of manifests): one
+      tag like `python:3.12` points to a list mapping `linux/amd64`,
+      `linux/arm64`, etc. to per-architecture manifests, so `docker pull` on an M-
+      series Mac and on an x86 server both "just work" from the same tag — the
+      client picks the matching entry.
+
+      Because everything is content-addressed, the registry deduplicates storage
+      globally and the client caches by digest locally — the same idea that makes
+      Git efficient (next course) applied to container images.
+    cards:
+      - front: "Tag vs digest — which is safe to deploy in production and why?"
+        back: "The digest (sha256). Tags are mutable pointers that can be re-pushed to different bytes; a digest is the immutable content identity, guaranteeing byte-identical pulls."
+      - front: "What does `docker push` actually upload?"
+        back: "Layer blobs (each addressed by sha256, skipped if the registry already has them) plus a small manifest JSON listing the config + layer digests."
+      - front: "How does one tag like `python:3.12` work on both arm64 and amd64?"
+        back: "A manifest list (manifest of manifests) maps each architecture to its own image manifest; the client pulls the entry matching its platform."
+      - front: "Why avoid `:latest` in production?"
+        back: "`latest` is just a mutable tag that can silently change to different bytes; pin explicit version tags or digests for reproducibility."
+      - cloze: "An image's true identity is its manifest {{c1::digest}} (sha256); a {{c2::tag}} is a movable pointer to it."
+    feynman:
+      - "Explain why pushing a small change to a big image uploads almost nothing."
+      - "Why do CI pipelines deploy by digest rather than by tag?"
+    labs:
+      - title: "Publish an image and pin it"
+        slug: lab-push-image
+        difficulty: core
+        est_minutes: 18
+        scenario: |
+          You built an image and need to share it via a registry, then deploy it
+          reproducibly.
+        deliverable: |
+          1. Tag a local image for a registry (e.g. ghcr.io/<you>/app:1.0).
+          2. Describe the login + push commands.
+          3. Show how to find the pushed image's digest.
+          4. Explain how you'd deploy by digest and why.
+        hints: |
+          - `docker tag`, `docker push`, `docker inspect --format '{{index .RepoDigests 0}}'`
+        solution: |
+          ```bash
+          docker tag app:1.0 ghcr.io/leily/app:1.0
+          docker login ghcr.io
+          docker push ghcr.io/leily/app:1.0
+          docker inspect --format '{{index .RepoDigests 0}}' ghcr.io/leily/app:1.0
+          # deploy that exact digest: ghcr.io/leily/app@sha256:...
+          ```
+          Deploying the digest guarantees prod runs the byte-identical image CI
+          tested, even if someone later re-pushes the :1.0 tag.
+
+  - title: "Production best practices"
+    slug: production-best-practices
+    order: 2
+    est_minutes: 18
+    summary: "Security, size, health, and reliability habits for real deployments."
+    body: |
+      ## A checklist that matters
+
+      **Security**
+      - Run as a **non-root** `USER`; drop capabilities you don't need.
+      - Use minimal bases (slim/distroless); fewer packages = fewer CVEs.
+      - **Never bake secrets into images** (they're in the layers forever). Inject
+        at runtime via env/secrets/mounts.
+      - Scan images (`docker scout`, Trivy) in CI.
+
+      **Reliability**
+      - Add a **HEALTHCHECK** so orchestrators know when the app is actually ready.
+      - Make the app handle **SIGTERM** for graceful shutdown (chapter 2).
+      - Set a sensible **restart policy**.
+
+      **Size & reproducibility**
+      - Multi-stage builds, `.dockerignore`, pinned base digests.
+
+      ```dockerfile
+      FROM python:3.12-slim
+      RUN useradd -u 1001 app
+      WORKDIR /app
+      COPY --chown=app requirements.txt .
+      RUN pip install --no-cache-dir -r requirements.txt
+      COPY --chown=app . .
+      USER app
+      HEALTHCHECK --interval=30s --timeout=3s CMD curl -f http://localhost:8000/health || exit 1
+      CMD ["python", "app.py"]
+      ```
+    deep_dive: |
+      ### Why "no secrets in images" is absolute, and how HEALTHCHECK is used
+
+      **Secrets in layers are forever.** Because layers are immutable, content-
+      addressed diffs (chapter 1), a secret you `COPY` or `ENV` into an image is
+      permanently recorded in that layer's bytes — *even if a later instruction
+      deletes it*, and even if you never `docker push` the final tag, anyone who
+      pulls any image sharing that layer can `docker history`/extract it. `ARG`
+      isn't safe either (it can leak into history). The only correct model is to
+      keep secrets **out of build** and **inject at runtime**: env vars from a
+      secret store, mounted files (tmpfs), or orchestrator secrets (Compose/K8s/
+      cloud). BuildKit `--secret` mounts exist precisely so a build can *use* a
+      secret without it landing in a layer.
+
+      **HEALTHCHECK turns "running" into "ready".** A container being *up* (PID 1
+      alive) doesn't mean the app inside is serving — it may still be warming
+      caches or waiting on the DB (the `depends_on` problem). A `HEALTHCHECK` makes
+      Docker periodically run a probe command inside the container and set the
+      container's health status to `starting` → `healthy`/`unhealthy`. Orchestrators
+      then act on it: Compose's `condition: service_healthy`, Swarm/K8s rolling
+      updates that wait for healthy before sending traffic and roll back on
+      unhealthy. This is the same readiness-vs-liveness distinction that underpins
+      zero-downtime deploys.
+
+      **The security posture ties back to the kernel chapters.** Running as non-
+      root limits what a compromised process can do; combined with **user
+      namespaces** (remapping container-root to an unprivileged host UID) and
+      **dropped capabilities**/seccomp/AppArmor, you shrink the blast radius of the
+      shared-kernel model that makes containers cheap but less isolated than VMs.
+      Defense in depth (the Network+ lesson) applies inside the container too:
+      minimal base (less to exploit) + non-root (less authority) + no secrets (less
+      to steal) + scanning (catch known CVEs) — no single control is enough alone.
+    cards:
+      - front: "Why must secrets never be baked into an image at build time?"
+        back: "Layers are immutable content-addressed diffs — the secret persists in that layer's bytes forever (recoverable via docker history/extraction), even if a later step deletes it. Inject secrets at runtime instead."
+      - front: "What does a Docker HEALTHCHECK give you that 'container is running' does not?"
+        back: "Readiness: a probe that marks the container healthy/unhealthy so orchestrators wait for ready before routing traffic and can roll back/restart on failure."
+      - front: "Name three habits that reduce a container image's attack surface."
+        back: "Minimal base (slim/distroless), run as non-root USER, and no secrets in the image (plus scanning for CVEs and dropping capabilities)."
+      - front: "Why run the container process as a non-root user?"
+        back: "Least privilege — a compromised app isn't root in the container (and with user namespaces, not root on the host), shrinking the blast radius of the shared-kernel model."
+      - cloze: "Keep secrets out of images and inject them at {{c1::runtime}}; add a {{c2::HEALTHCHECK}} so orchestrators know the app is actually ready."
+    feynman:
+      - "Explain why deleting a secret in a later Dockerfile layer doesn't make it safe."
+      - "Describe how a HEALTHCHECK enables zero-downtime rolling deploys."
+    labs:
+      - title: "Harden a Dockerfile"
+        slug: lab-harden-dockerfile
+        difficulty: challenge
+        est_minutes: 24
+        scenario: |
+          You inherit a Dockerfile that runs as root, bakes an API key with ENV,
+          uses a full ubuntu base, and has no healthcheck. Harden it.
+        deliverable: |
+          Rewrite it to: use a slim base, create and switch to a non-root user,
+          remove the baked secret (state how the key should be provided instead),
+          add a HEALTHCHECK, and use --no-cache-dir / clean steps. Explain each change.
+        hints: |
+          - useradd + USER; drop ENV API_KEY; inject at `docker run -e`; HEALTHCHECK
+        solution: |
+          ```dockerfile
+          FROM python:3.12-slim
+          RUN useradd -u 1001 app
+          WORKDIR /app
+          COPY --chown=app requirements.txt .
+          RUN pip install --no-cache-dir -r requirements.txt
+          COPY --chown=app . .
+          USER app
+          HEALTHCHECK --interval=30s --timeout=3s CMD curl -f http://localhost:8000/health || exit 1
+          CMD ["python","app.py"]
+          ```
+          The API key is removed from the image and supplied at runtime
+          (`docker run -e API_KEY=... ` or a mounted secret), since anything baked
+          in lives in the layers permanently.
+
+quiz:
+  title: "Registries & Best Practices — chapter exam"
+  slug: docker-registries-bestpractices-exam
+  scope: chapter
+  description: "Registries, tags/digests, and production hardening."
+  questions:
+    - type: command
+      text: "Tag the local image app:1.0 for the registry path ghcr.io/leily/app:1.0."
+      explanation: "`docker tag app:1.0 ghcr.io/leily/app:1.0`"
+      answers:
+        - {value: "docker tag app:1.0 ghcr.io/leily/app:1.0", match: exact}
+    - type: mcq
+      text: "Which should you deploy for a reproducible production release?"
+      explanation: "The immutable digest; tags can be re-pushed."
+      choices:
+        - {text: "The image digest (sha256)", correct: true}
+        - {text: "The :latest tag"}
+        - {text: "A mutable version tag only"}
+        - {text: "The container name"}
+    - type: true_false
+      text: "Deleting a secret in a later Dockerfile layer makes the image safe to publish."
+      explanation: "False — the secret persists in the earlier layer's bytes; never bake secrets in."
+      choices:
+        - {text: "True"}
+        - {text: "False", correct: true}
+    - type: mcq
+      text: "What does a HEALTHCHECK provide?"
+      explanation: "A readiness/liveness signal orchestrators use before routing traffic."
+      choices:
+        - {text: "A health/readiness status for orchestrators", correct: true}
+        - {text: "Automatic image scanning"}
+        - {text: "Smaller image size"}
+        - {text: "A published port"}
+    - type: mcq
+      text: "Best way to reduce CVEs in your image?"
+      explanation: "Minimal base + non-root + fewer packages; scan in CI."
+      choices:
+        - {text: "Use a minimal base and run as non-root", correct: true}
+        - {text: "Add more packages for convenience"}
+        - {text: "Run everything as root"}
+        - {text: "Always use :latest"}

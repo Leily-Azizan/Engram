@@ -1,0 +1,170 @@
+chapter:
+  title: "Build and Push a Docker Image"
+  slug: build-and-push-image
+  order: 4
+  summary: "Turn CI green into a published, deployable artifact: build, tag, and push an image."
+
+lessons:
+  - title: "Building and pushing images in CI"
+    slug: ci-build-push
+    order: 1
+    est_minutes: 22
+    summary: "Authenticate to a registry, build an image, tag it meaningfully, and push."
+    body: |
+      ## The job: code → image in the registry
+
+      Once tests pass, package the app as a Docker image (Docker course) and push
+      it to a registry so it can be deployed.
+
+      ```yaml
+      build-image:
+        needs: test
+        runs-on: ubuntu-latest
+        permissions:
+          contents: read
+          packages: write            # allow pushing to GHCR
+        steps:
+          - uses: actions/checkout@v4
+          - uses: docker/login-action@v3
+            with:
+              registry: ghcr.io
+              username: ${{ github.actor }}
+              password: ${{ secrets.GITHUB_TOKEN }}
+          - uses: docker/build-push-action@v6
+            with:
+              context: .
+              push: true
+              tags: ghcr.io/${{ github.repository }}:${{ github.sha }}
+      ```
+
+      ## Tag images meaningfully
+
+      - `:${{ github.sha }}` — the **commit SHA**: immutable, traceable to source.
+      - `:1.4.2` — a semantic version on releases.
+      - `:latest` — convenience pointer (don't deploy by it).
+
+      Tagging by the commit SHA means every image traces back to the exact code
+      that built it.
+    deep_dive: |
+      ### Building images inside CI: auth, daemon, and provenance
+
+      Three things make CI image builds different from your laptop:
+
+      **1. Authentication without passwords.** CI shouldn't hold long-lived registry
+      passwords. GitHub gives each run a short-lived `GITHUB_TOKEN` scoped by the
+      job's `permissions:` (`packages: write` to push to GHCR). For external clouds
+      (ECR/GCR), the modern approach is **OIDC**: the runner presents a signed
+      identity token, the cloud verifies it and hands back **temporary**
+      credentials — no static secret stored at all. This is the secret-handling
+      lesson (next chapter) applied to the registry: prefer ephemeral, least-
+      privilege tokens over stored passwords.
+
+      **2. Where the build runs.** `docker build` needs a builder. On hosted runners
+      Docker is available; `docker/build-push-action` uses **BuildKit** (the modern
+      builder) which can build, cache layers to the registry, build multi-arch via
+      QEMU/buildx, and push — all in one step. BuildKit's registry-backed layer
+      cache is how CI avoids rebuilding unchanged layers across runs (the Docker
+      build-cache lesson, persisted to the registry because the runner itself is
+      ephemeral).
+
+      **3. Reproducibility & provenance.** Tagging by **commit SHA** is the linchpin
+      that ties everything together: the image `…:${{ github.sha }}` is permanently
+      traceable to the exact source commit that produced it. Combined with image
+      **digests** (Docker registries lesson), the pipeline pattern becomes: build →
+      push by SHA tag → **capture the resulting digest** → deploy that digest. Now
+      "what's running in prod?" has a single answer that chains image digest → SHA
+      tag → git commit → PR → review. That audit chain is *why* CI/CD is trusted to
+      ship automatically.
+
+      A subtlety: `:latest` and even SHA *tags* are mutable pointers; the **digest**
+      is the immutable identity. Mature pipelines therefore deploy by digest, using
+      the tag only as a human-readable convenience — exactly the tags-vs-digests
+      distinction from the Docker course, now load-bearing for safe delivery.
+    cards:
+      - front: "Why tag CI-built images with the commit SHA?"
+        back: "It makes every image immutably traceable to the exact source commit that built it — enabling an audit chain from running image → commit → PR."
+      - front: "How should CI authenticate to a registry without storing a password?"
+        back: "Use a short-lived token (e.g. GitHub's GITHUB_TOKEN scoped via job permissions) or OIDC, where the runner exchanges a signed identity token for temporary cloud credentials — no static secret."
+      - front: "What does `permissions: { packages: write }` do in a workflow job?"
+        back: "Grants that job's GITHUB_TOKEN permission to push packages/images (e.g. to GHCR), following least privilege."
+      - front: "The robust CI image pattern: build → push by SHA → ? → deploy ?"
+        back: "Capture the resulting image *digest*, then deploy that digest — so prod runs byte-identical bytes to what was tested, traceable to the commit."
+      - cloze: "CI authenticates to GHCR with the short-lived `${{ secrets.{{c1::GITHUB_TOKEN}} }}`, and tags images by `${{ github.{{c2::sha}} }}` for traceability."
+    feynman:
+      - "Explain how tagging by commit SHA + deploying by digest answers 'what exactly is running in prod?'."
+      - "Why is OIDC preferable to storing a registry password in CI?"
+    labs:
+      - title: "Add an image build-and-push job"
+        slug: lab-build-push-job
+        difficulty: challenge
+        est_minutes: 24
+        scenario: |
+          Your CI tests pass but nothing is published. Add a job that builds and
+          pushes a Docker image only after tests succeed, tagged by commit SHA.
+        deliverable: |
+          Write a `build-image` job that:
+          1. Runs only after the test job (`needs:`).
+          2. Logs into GHCR with the built-in token and correct permissions.
+          3. Builds the Dockerfile and pushes it tagged with the commit SHA.
+          4. Explain how you'd then deploy by digest.
+        hints: |
+          - needs:, permissions: packages: write, docker/login-action, docker/build-push-action
+        solution: |
+          ```yaml
+          build-image:
+            needs: test
+            runs-on: ubuntu-latest
+            permissions: { contents: read, packages: write }
+            steps:
+              - uses: actions/checkout@v4
+              - uses: docker/login-action@v3
+                with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
+              - uses: docker/build-push-action@v6
+                with:
+                  context: .
+                  push: true
+                  tags: ghcr.io/${{ github.repository }}:${{ github.sha }}
+          ```
+          The push output includes the image **digest**; capture it as a job output
+          and have the deploy job reference `…@sha256:<digest>` for an immutable,
+          traceable deploy.
+
+quiz:
+  title: "Build & Push a Docker Image — chapter exam"
+  slug: cicd-build-push-exam
+  scope: chapter
+  description: "Building and publishing images from CI."
+  questions:
+    - type: mcq
+      text: "Why tag a CI-built image with the git commit SHA?"
+      explanation: "Immutable traceability from image to the exact source commit."
+      choices:
+        - {text: "So the image is traceable to the exact commit", correct: true}
+        - {text: "To make the image smaller"}
+        - {text: "Because :latest is forbidden"}
+        - {text: "To skip authentication"}
+    - type: mcq
+      text: "Best practice for CI registry authentication?"
+      explanation: "Short-lived tokens or OIDC-issued temporary credentials, least privilege."
+      choices:
+        - {text: "Short-lived token / OIDC temporary credentials", correct: true}
+        - {text: "A personal password committed to the repo"}
+        - {text: "No authentication"}
+        - {text: "A shared admin account"}
+    - type: true_false
+      text: "Mature pipelines deploy by image digest rather than a mutable tag."
+      explanation: "True — the digest is immutable and guarantees byte-identical deploys."
+      choices:
+        - {text: "True", correct: true}
+        - {text: "False"}
+    - type: mcq
+      text: "What grants a job's token permission to push images to GHCR?"
+      explanation: "`permissions: packages: write` in the job."
+      choices:
+        - {text: "permissions: packages: write", correct: true}
+        - {text: "runs-on: ubuntu-latest"}
+        - {text: "needs: test"}
+        - {text: "on: push"}

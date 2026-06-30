@@ -1,0 +1,154 @@
+chapter:
+  title: "The CI/CD Pipeline Model"
+  slug: pipeline-model
+  order: 1
+  summary: "What CI, CD, and CD mean, why pipelines exist, and the anatomy of a pipeline."
+
+lessons:
+  - title: "CI, CD, and why pipelines exist"
+    slug: ci-cd-concepts
+    order: 1
+    est_minutes: 18
+    summary: "The three terms, the pipeline anatomy, and the value of automating the path to production."
+    body: |
+      ## The three terms
+
+      - **CI — Continuous Integration**: every push automatically **builds and
+        tests** the code, so problems surface in minutes, not at release.
+      - **CD — Continuous Delivery**: every passing change is automatically prepared
+        and **ready to deploy** (a human clicks "release").
+      - **CD — Continuous Deployment**: passing changes **deploy to production
+        automatically**, no human gate.
+
+      ## Anatomy of a pipeline
+
+      ```
+      trigger (push/PR/tag)
+        → stage: build    (compile / build image)
+        → stage: test     (unit, integration, lint)
+        → stage: package  (artifact / Docker image)
+        → stage: deploy   (staging → production)
+      ```
+
+      A **pipeline** is an ordered set of **stages**; each stage has one or more
+      **jobs**; each job runs **steps**. A failing step fails the job, which
+      usually stops the pipeline — so broken code can't proceed.
+
+      ## Why automate this
+
+      - **Fast feedback** — catch bugs at commit time, cheaply.
+      - **Consistency** — the same steps every time, no "forgot to run tests."
+      - **Safety** — a green pipeline gate protects `main` and production.
+      - **Speed** — ship many times a day with confidence.
+
+      This is the natural partner of trunk-based development (Git course): frequent
+      integration is only safe with automated checks on every change.
+    deep_dive: |
+      ### What actually runs your pipeline: runners and ephemeral environments
+
+      A pipeline definition (YAML) is just *intent*. Something has to execute it —
+      a **runner** (GitHub Actions) / **executor** (GitLab) / **agent** (Jenkins).
+      The model that makes modern CI reliable is the **ephemeral, clean
+      environment**:
+
+      1. An **event** (push, PR, tag, schedule) reaches the CI service.
+      2. The service matches it against your workflow files and creates **jobs**.
+      3. Each job is dispatched to a runner, which spins up a **fresh, isolated
+         environment** — almost always a **container or a throwaway VM** (this is
+         why Docker knowledge pays off: CI runs *in* containers). It checks out your
+         code, runs the steps, then is **destroyed**.
+
+      That "fresh every time" property is the whole point: builds are
+      **reproducible** and can't be polluted by leftover state from a previous run
+      ("works on my machine" dies here). It's also why **caching** and **artifacts**
+      are explicit features — since the environment is wiped, anything you want to
+      reuse (dependencies) or pass to a later job (a built binary/image) must be
+      deliberately saved and restored (later chapters).
+
+      **Stages/jobs form a DAG, not just a list.** Jobs declare dependencies
+      (`needs:`); independent jobs (e.g. lint, unit tests, type-check) run **in
+      parallel** on separate runners for speed, while dependent ones (deploy
+      `needs:` build) wait. The pipeline is the dependency graph the scheduler
+      walks — same "describe desired state / let the tool converge" idea as Docker
+      Compose and Kubernetes.
+
+      **Fail-fast is a feature.** A non-zero exit code from any step fails the job;
+      a failed required job stops the pipeline and (with branch protection) blocks
+      the merge/deploy. This is exactly why your scripts and tests must return
+      proper exit codes (LPIC scripting lesson) — the entire pipeline reacts to
+      them. CI is, fundamentally, "run the right commands in a clean box on every
+      change and act on their exit codes."
+    cards:
+      - front: "CI vs Continuous Delivery vs Continuous Deployment?"
+        back: "CI: auto build+test every change. Continuous Delivery: every passing change is kept deployable (human clicks release). Continuous Deployment: passing changes deploy to prod automatically (no gate)."
+      - front: "What is a CI runner/executor, and why is it ephemeral?"
+        back: "The machine/agent that executes pipeline jobs — it spins up a fresh, isolated environment (usually a container/VM), runs the steps, then is destroyed, so builds are clean and reproducible."
+      - front: "Why are caching and artifacts explicit features in CI?"
+        back: "Because the environment is wiped after each job, anything to reuse (dependencies → cache) or hand to a later job (build output → artifact) must be deliberately saved and restored."
+      - front: "Pipeline structure: pipeline → ? → ?"
+        back: "A pipeline has stages; each stage has jobs; each job runs steps. Jobs form a DAG via dependencies, so independent jobs run in parallel."
+      - cloze: "A CI job runs in an {{c1::ephemeral}} environment that's created fresh and then {{c2::destroyed}}, which is why builds are reproducible."
+      - cloze: "A non-zero {{c1::exit code}} from a step fails the job and (with branch protection) blocks the merge/deploy."
+    feynman:
+      - "Explain why running CI in a fresh container each time kills 'works on my machine'."
+      - "Connect CI to trunk-based development from the Git course."
+    labs:
+      - title: "Map a pipeline for an app"
+        slug: lab-map-pipeline
+        difficulty: intro
+        est_minutes: 15
+        scenario: |
+          Before writing any YAML, you design the pipeline for a Python web app that
+          ships as a Docker image.
+        deliverable: |
+          1. List the stages from push to production, in order.
+          2. For each stage, name the concrete commands/tools it would run.
+          3. Identify which jobs could run in parallel.
+          4. State what must be cached and what must be passed as an artifact.
+        hints: |
+          - build → lint/test (parallel) → build image → push → deploy
+        solution: |
+          - **Trigger**: push / PR.
+          - **Install+cache deps** (`pip install`; cache the wheels/venv by lockfile hash).
+          - **Parallel checks**: `ruff`/`flake8` (lint), `pytest` (tests), `mypy` (types).
+          - **Build image** (`docker build`) → **artifact/registry**: push image,
+            capture its digest.
+          - **Deploy**: staging → (gate) → production using that digest.
+          Cache: dependencies. Artifact: the built image (via registry) / coverage report.
+
+quiz:
+  title: "The CI/CD Pipeline Model — chapter exam"
+  slug: cicd-pipeline-model-exam
+  scope: chapter
+  description: "CI/CD concepts and pipeline anatomy."
+  questions:
+    - type: mcq
+      text: "What distinguishes Continuous Deployment from Continuous Delivery?"
+      explanation: "Deployment auto-ships to prod; Delivery keeps it deployable but a human releases."
+      choices:
+        - {text: "Deployment ships to production automatically (no human gate)", correct: true}
+        - {text: "Delivery skips testing"}
+        - {text: "They are identical"}
+        - {text: "Deployment doesn't run tests"}
+    - type: mcq
+      text: "Why does CI run each job in a fresh environment?"
+      explanation: "Clean, isolated, reproducible builds — no leftover state."
+      choices:
+        - {text: "For clean, reproducible builds with no leftover state", correct: true}
+        - {text: "To save money on storage"}
+        - {text: "Because YAML requires it"}
+        - {text: "To avoid using containers"}
+    - type: true_false
+      text: "A non-zero exit code from a pipeline step typically fails the job."
+      explanation: "True — pipelines react to exit codes; non-zero = failure."
+      choices:
+        - {text: "True", correct: true}
+        - {text: "False"}
+    - type: mcq
+      text: "Independent jobs (lint, unit tests, type-check) in a pipeline usually..."
+      explanation: "Run in parallel on separate runners for speed."
+      choices:
+        - {text: "Run in parallel", correct: true}
+        - {text: "Must run strictly one after another"}
+        - {text: "Run on the production server"}
+        - {text: "Cannot exist in one pipeline"}

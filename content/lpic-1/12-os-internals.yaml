@@ -1,0 +1,640 @@
+chapter:
+  title: "Operating System Internals"
+  slug: os-internals
+  order: 12
+  summary: "How Linux really works underneath the commands — virtualizing the CPU and memory, scheduling, and concurrency. The OSTEP foundations behind every tool you've used."
+
+lessons:
+  - title: "Virtual memory and paging"
+    slug: virtual-memory-paging
+    order: 1
+    est_minutes: 30
+    summary: "How every process gets its own private memory — address spaces, page tables, the TLB, page faults, and swap."
+    body: |
+      ## The illusion: a private address space
+
+      Every process believes it owns a huge, contiguous block of memory starting
+      at address 0 — its **virtual address space** (code, heap, stack). In reality
+      the OS and hardware (the **MMU**) map those virtual addresses onto scattered
+      physical RAM. This buys three things:
+
+      - **Isolation** — one process literally cannot name another's memory.
+      - **Simplicity** — every program is compiled as if it alone owns memory.
+      - **Overcommit** — the sum of all virtual spaces can exceed physical RAM.
+
+      ## Paging: memory in fixed-size chunks
+
+      Virtual memory is split into fixed-size **pages** (typically 4 KB); physical
+      RAM into equal **frames**. A per-process **page table** maps each virtual page
+      to a physical frame. A virtual address divides into a **page number** (index
+      into the page table) plus an **offset** (the byte within the page).
+
+      Each **page-table entry (PTE)** carries control bits:
+
+      - **valid** — is this page part of the address space at all? (unused pages are
+        marked invalid, which is how a sparse 0-to-huge space costs almost nothing)
+      - **present** — is it in RAM right now, or swapped out to disk?
+      - **protection** — read / write / execute, enforced by hardware (a violation
+        is what produces a segmentation fault).
+
+      ## See it on Linux
+
+      ```bash
+      cat /proc/$$/maps        # this shell's virtual memory regions
+      free -h                  # RAM + swap in use
+      vmstat 1                 # si / so columns = swap-in / swap-out per second
+      swapon --show            # active swap areas
+      ```
+
+      ## Page faults and swap
+
+      When code touches a page whose **present** bit is 0, the MMU raises a **page
+      fault** — a trap into the kernel. The kernel finds the page (on swap, or a
+      fresh zero-filled one), loads it into a free frame, fixes the PTE, and resumes
+      the instruction. If RAM is full it must first **evict** a page using a
+      *replacement policy*. A little swapping is fine; constant swapping
+      (**thrashing**) collapses performance, because disk is roughly 100,000× slower
+      than RAM.
+    deep_dive: |
+      ### Address translation, the TLB, and demand paging — the real cost
+
+      **Translation would otherwise double every memory access.** A page table is an
+      array of PTEs living in RAM, so a naive translation needs *two* memory
+      accesses: one to read the PTE, one for the actual data. Worse, a single flat
+      table for a 48-bit address space would be enormous, so real CPUs use
+      **multi-level page tables** (a tree) — meaning *several* lookups per
+      translation.
+
+      **The TLB hides that cost.** The MMU caches recent virtual→physical
+      translations in a **Translation Lookaside Buffer**. On a **TLB hit**,
+      translation is effectively free; on a **miss**, the hardware (or OS) walks the
+      page table, fills the TLB, and retries. Because programs have **locality** —
+      they reuse the same handful of pages — hit rates are very high, and the TLB is
+      precisely what makes paging practical. A context switch is expensive partly
+      because the old process's TLB entries are now meaningless and must be flushed
+      (or tagged with an address-space ID).
+
+      **Demand paging and replacement.** Pages load **lazily** — only when first
+      touched — so a program starts quickly and never-used pages cost nothing. When
+      memory is tight the kernel approximates **LRU** cheaply with the hardware
+      **use (accessed) bit**: a *clock* sweep skips recently-used pages and evicts an
+      unused one. Dirty pages must be written to swap first; clean, file-backed pages
+      can simply be dropped and re-read. OSTEP's crux — *which page to evict* — is a
+      bet that the near future resembles the recent past, which locality usually
+      makes a good bet.
+    cards:
+      - front: "What problem does a virtual address space solve?"
+        back: "It gives each process the illusion of private, contiguous memory — providing isolation, a simple uniform model for every program, and the ability to overcommit physical RAM."
+      - front: "Name the three key bits in a page-table entry (PTE)."
+        back: "valid (is the page part of the address space?), present (is it in RAM or swapped to disk?), and protection (read / write / execute)."
+      - front: "What is the TLB and why does it matter?"
+        back: "The Translation Lookaside Buffer caches recent virtual-to-physical translations in the MMU. Without it every memory access would need extra accesses to walk the page table; locality gives it a high hit rate, making paging fast."
+      - front: "Walk through what happens on a page fault."
+        back: "The CPU traps to the kernel because the accessed page isn't present in RAM. The kernel loads it (from swap, or zero-fills a new one), updates the PTE, and restarts the instruction — first evicting another page if RAM is full."
+      - cloze: "Memory is divided into fixed-size {{c1::pages}} (typically {{c2::4 KB}}), mapped onto physical {{c3::frames}} by the page table."
+      - cloze: "Constant swapping that collapses performance is called {{c1::thrashing}}."
+      - cloze: "The kernel approximates LRU cheaply using the hardware {{c1::use}} (accessed) bit in a clock sweep."
+    feynman:
+      - "Explain how one virtual address becomes a physical RAM address, and where the TLB fits in."
+      - "Why can the total virtual memory of all running processes exceed the physical RAM installed?"
+      - "A server is slow and `vmstat` shows high si/so. Explain what is happening at the page level."
+    labs:
+      - title: "Map a process and watch it page"
+        slug: lab-vm-inspect
+        difficulty: core
+        est_minutes: 25
+        scenario: |
+          You want to *see* virtual memory, not just read about it. Using only tools
+          on a normal Linux box, inspect a process's address space and observe paging
+          under memory pressure.
+        deliverable: |
+          1. Show your shell's memory regions: `cat /proc/$$/maps` — find the code,
+             `[heap]`, and `[stack]` regions and the mapped libc.
+          2. Show system memory and swap: `free -h` and `swapon --show`.
+          3. In one terminal run `vmstat 1`; in another, generate memory pressure (a
+             small program that allocates a large array) and watch the `si`/`so` (swap)
+             and `free` columns move.
+          4. Write 3–4 sentences: which PTE state changed for the evicted pages, and
+             why disk activity spikes.
+        hints: |
+          - `/proc/<pid>/maps` columns: address range, perms (r/w/x/p), offset, device,
+            inode, path.
+          - No `stress-ng`? `python3 -c "x=[0]*10**8; input()"` allocates ~800 MB then
+            waits for Enter.
+          - The `present` bit goes to 0 for evicted pages; touching them later faults
+            them back in.
+        solution: |
+          `cat /proc/$$/maps` shows `[heap]`, `[stack]`, the mapped libc, and the
+          executable. Under pressure the kernel evicts least-recently-used pages: it
+          clears their **present** bit and writes dirty ones to swap, so `so` rises.
+          When the process touches them again, a **page fault** loads them back and
+          `si` rises. If allocation exceeds RAM+swap, the OOM killer terminates a
+          process. The disk spikes because every evict/fault is disk I/O — about
+          100,000× slower than RAM, which is the essence of thrashing.
+
+  - title: "CPU scheduling"
+    slug: cpu-scheduling
+    order: 2
+    est_minutes: 28
+    summary: "How the OS shares one CPU among many processes — FIFO, SJF, round-robin, MLFQ, and Linux's CFS."
+    body: |
+      ## The problem
+
+      There are far more runnable processes than CPUs, so the **scheduler** must
+      decide who runs next and for how long. It is pure *policy* layered on the
+      *mechanism* (the timer interrupt and context switch from the processes lesson).
+
+      ## Two metrics that fight each other
+
+      - **Turnaround time** = completion − arrival. Minimized by running jobs to
+        completion.
+      - **Response time** = first-run − arrival. Minimized by switching often so
+        interactive jobs react quickly.
+
+      You cannot fully optimize both at once — batch throughput versus interactivity
+      is the central tension of scheduling.
+
+      ## The classic policies
+
+      - **FIFO** — run in arrival order. Simple, but a long job at the front causes
+        the **convoy effect**, wrecking turnaround for the short jobs behind it.
+      - **SJF / STCF** — shortest-job-first (preemptive) minimizes average turnaround,
+        but needs to know job lengths and can **starve** long jobs.
+      - **Round-robin (RR)** — give each job a small **time slice** in turn. Great
+        response time, worse turnaround; the slice size trades responsiveness against
+        context-switch overhead.
+
+      ## MLFQ — learn the workload
+
+      The **Multi-Level Feedback Queue** needs no foreknowledge of job lengths:
+
+      1. A higher-priority queue runs first; equal priority runs round-robin.
+      2. New jobs enter at the **top**.
+      3. Use a whole slice → **drop** a level (CPU-bound work sinks); give up the CPU
+         early → **stay** (I/O-bound work floats).
+      4. Periodically **boost** everyone to the top — prevents starvation and adapts
+         when a job changes behavior.
+
+      ## Linux: CFS plus control
+
+      The default Linux scheduler, **CFS**, instead chases fairness: it tracks each
+      task's **virtual runtime** and runs whoever has accrued the least.
+
+      ```bash
+      nice -n 10 ./batch.sh       # start a low-priority job
+      renice -n 5 -p 1234         # change a running process's niceness
+      chrt -f 80 ./rt-task        # SCHED_FIFO real-time priority 80
+      taskset -c 0,1 ./job        # pin to CPUs 0 and 1 (affinity)
+      top                         # the PR / NI columns show priority / niceness
+      ```
+    deep_dive: |
+      ### Gaming the scheduler, multicore, and Linux scheduling classes
+
+      **MLFQ's anti-gaming rule.** Naive MLFQ can be cheated: a process that issues a
+      tiny I/O just before its slice expires keeps "giving up the CPU early" and so
+      never drops, hogging high priority forever. The fix is to account for **total
+      CPU time used at a level**, not per-slice behavior — once a job spends its
+      *allotment* it drops, regardless of how it relinquished the CPU. The periodic
+      **priority boost** then double-protects against starvation and lets a job that
+      was CPU-bound but turns interactive climb back up.
+
+      **Scheduling is harder on multicore.** Each CPU keeps its own **run queue** (a
+      single global queue would need one lock and not scale), but that creates two
+      tensions: **cache affinity** — a process runs fastest on the CPU whose caches
+      are already warm with its data, so the scheduler prefers to keep it there — and
+      **load balancing**, migrating or stealing work to keep idle cores busy. These
+      pull against each other, which is why pinning with `taskset` can sometimes beat
+      the default placement.
+
+      **Linux scheduling classes.** Not everything is "fair." The kernel consults
+      classes in priority order: real-time **SCHED_FIFO** / **SCHED_RR** tasks (set
+      with `chrt`) always preempt normal tasks and exist for latency-critical work;
+      the default **SCHED_OTHER** is served by **CFS**, which keeps a **red-black
+      tree** of runnable tasks keyed on virtual runtime so "pick the least-vruntime
+      task" is O(log n). **Nice** values scale how fast vruntime grows — a niced-down
+      task simply accumulates virtual time faster and so is chosen less often.
+    cards:
+      - front: "Turnaround time vs response time?"
+        back: "Turnaround = completion − arrival (minimized by finishing jobs); response = first-run − arrival (minimized by switching often). They trade off: throughput vs interactivity."
+      - front: "What is the convoy effect?"
+        back: "Under FIFO, one long-running job at the front of the queue forces all the short jobs behind it to wait, wrecking average turnaround time."
+      - front: "How does MLFQ distinguish CPU-bound from interactive jobs without knowing job lengths?"
+        back: "Jobs that use a whole time slice are demoted (CPU-bound sinks); jobs that give up the CPU early stay high (I/O-bound floats). A periodic boost prevents starvation."
+      - front: "What does Linux's CFS optimize, and how does nice fit in?"
+        back: "Proportional fairness: it runs the task with the lowest virtual runtime. Nice values weight how fast vruntime accrues — a lower nice value accrues slower, so the task is picked more often."
+      - front: "How does `chrt` differ from `nice`?"
+        back: "`nice`/`renice` adjust priority within CFS (SCHED_OTHER). `chrt` sets real-time policies (SCHED_FIFO/RR) that preempt all normal tasks — for latency-critical work."
+      - cloze: "{{c1::SJF}} minimizes average turnaround but needs to know job lengths and can {{c2::starve}} long jobs."
+      - cloze: "Keeping a process on the CPU whose cache is already warm with its data is called {{c1::cache affinity}}."
+      - cloze: "Pin a process to specific CPUs with `{{c1::taskset}}`."
+    feynman:
+      - "Explain why you cannot simultaneously minimize turnaround time and response time."
+      - "Walk through how MLFQ adapts when a long CPU-bound job suddenly becomes interactive."
+      - "Your latency-sensitive process keeps getting starved under load. Which scheduling tools would you reach for, and why?"
+    labs:
+      - title: "Watch the scheduler choose"
+        slug: lab-scheduling-observe
+        difficulty: core
+        est_minutes: 25
+        scenario: |
+          Make the scheduler's behavior visible. You'll run competing CPU-bound and
+          I/O-bound workloads, then bias them with niceness and affinity and observe
+          the effect.
+        deliverable: |
+          1. Start two CPU-bound loops in the background (`yes > /dev/null &` twice)
+             and watch them share a core in `top` (note the ~50/50 %CPU and their NI).
+          2. `renice` one of them to +19 and observe the CPU split shift.
+          3. Pin both to a single CPU with `taskset -cp 0 <pid>` and watch them
+             contend; then allow more CPUs and watch the split change.
+          4. Start an I/O-bound job (`while true; do ls -R / >/dev/null 2>&1; done &`)
+             and note how it stays responsive despite the CPU hogs.
+          5. Kill the background jobs (`kill %1 %2 ...`). Write 3–4 sentences
+             explaining what you saw in CFS terms.
+        hints: |
+          - In `top`, press `1` to see per-CPU usage; the NI column is niceness.
+          - `taskset -cp <cpulist> <pid>` changes the affinity of a running process.
+          - The I/O job yields the CPU constantly, so CFS hands it the CPU promptly
+            whenever it becomes runnable.
+        solution: |
+          Two `yes` loops split a core roughly 50/50 because CFS equalizes their
+          virtual runtime. After `renice +19`, the niced process accrues vruntime far
+          faster, so CFS picks it much less — its %CPU collapses while the other rises.
+          Pinned to one CPU they contend directly; given two CPUs they each take one.
+          The I/O-bound loop spends most of its time blocked, so its vruntime stays
+          low and CFS schedules it quickly whenever it wakes — it feels responsive even
+          though the CPUs are saturated.
+
+  - title: "Concurrency and locking"
+    slug: concurrency-and-locking
+    order: 3
+    est_minutes: 30
+    summary: "Threads, race conditions, locks, condition variables, and deadlock — why sharing state is hard."
+    body: |
+      ## Threads share memory
+
+      A **thread** is an independent flow of execution *within* a process. Multiple
+      threads share the same address space (heap, globals, file descriptors) but each
+      has its own stack and registers. That sharing is the point — cheap
+      communication and real parallelism on multicore — and also the danger.
+
+      ## The race condition
+
+      This innocent line is **not atomic**:
+
+      ```c
+      counter = counter + 1;   // really: load counter; add 1; store counter
+      ```
+
+      It is three steps. If two threads interleave between the load and the store,
+      one update is silently lost. A bug whose outcome depends on timing like this is
+      a **race condition**. The code touching shared state is a **critical section**,
+      and we need **mutual exclusion** — only one thread inside at a time.
+
+      ## Locks (mutexes)
+
+      A **lock** enforces mutual exclusion:
+
+      ```c
+      pthread_mutex_lock(&m);
+      counter = counter + 1;     // critical section — now safe
+      pthread_mutex_unlock(&m);
+      ```
+
+      Hold a lock for as *short* a time as possible: too coarse and you kill
+      parallelism, too fine and you invite bugs.
+
+      ## Condition variables — waiting for an event
+
+      Locks give exclusion; **condition variables** give *ordering*. A thread can
+      `wait()` (sleeping and releasing the lock) until another thread `signal()`s
+      that something changed. This is how a **producer/consumer** queue makes
+      consumers block until there is an item, instead of busy-spinning.
+
+      ## Deadlock
+
+      Two threads each holding a lock the other needs will wait forever — a
+      **deadlock**. (In CPython, the **GIL** serializes bytecode so pure-Python
+      threads don't corrupt interpreter state — but they also don't parallelize CPU
+      work, which is what multiprocessing is for.)
+    deep_dive: |
+      ### How a lock is actually built, and the anatomy of deadlock
+
+      **Mutual exclusion needs hardware help.** You cannot build a correct lock from
+      ordinary loads and stores at modern CPU speeds; processors provide an **atomic**
+      instruction such as **test-and-set** or **compare-and-swap (CAS)** that reads
+      *and* writes a memory word in one indivisible step. A simple **spinlock** is
+      just `while (test_and_set(&flag)) ;` — correct, but it **burns CPU** spinning,
+      which is pure waste if the lock holder has been descheduled.
+
+      **That's where the OS comes in.** Linux uses a **futex** ("fast userspace
+      mutex"): the uncontended case is a single atomic CAS entirely in userspace — no
+      syscall, very fast — and only when a thread genuinely must wait does it call
+      into the kernel to **park** (sleep) until the holder **wakes** it on unlock.
+      That gives the speed of spinning when locks are free and the efficiency of
+      sleeping when they're contended. CAS also underpins **lock-free** data
+      structures that avoid locks entirely.
+
+      **Deadlock needs four conditions at once** (Coffman): **mutual exclusion**,
+      **hold-and-wait** (holding one lock while requesting another), **no
+      preemption** (locks aren't forcibly reclaimed), and **circular wait** (a cycle
+      in who-waits-for-whom). Break any single one and deadlock becomes impossible.
+      The simplest practical fix destroys *circular wait* with a **global lock
+      ordering** — every thread acquires locks in the same agreed order, so no cycle
+      can form. To diagnose: `strace` shows threads blocked in `futex`,
+      `/proc/<pid>/task` lists a process's threads, and `gdb`'s
+      `thread apply all bt` dumps every thread's stack so you can spot the cycle.
+    cards:
+      - front: "Why is `counter = counter + 1` dangerous across threads?"
+        back: "It is not atomic — it compiles to load, add, store. If two threads interleave between the load and the store, one increment is lost. That's a race condition."
+      - front: "Difference between a lock and a condition variable?"
+        back: "A lock provides mutual exclusion (one thread in the critical section at a time). A condition variable provides ordering — a thread waits, sleeping and releasing the lock, until another signals that a condition changed."
+      - front: "What hardware support makes a correct lock possible?"
+        back: "An atomic read-modify-write instruction such as test-and-set or compare-and-swap (CAS), which reads and writes a memory word in one indivisible step."
+      - front: "What is a futex and why is it efficient?"
+        back: "A 'fast userspace mutex': the uncontended lock/unlock is a single atomic op in userspace (no syscall); only when a thread must wait does it enter the kernel to sleep, and the holder wakes it on unlock."
+      - front: "Name the four conditions required for deadlock."
+        back: "Mutual exclusion, hold-and-wait, no preemption, and circular wait. Breaking any one prevents deadlock — e.g. a global lock ordering removes circular wait."
+      - cloze: "Code that accesses shared state and must run with mutual exclusion is called a {{c1::critical section}}."
+      - cloze: "A simple {{c1::spinlock}} repeatedly tries test-and-set, but wastes CPU because it {{c2::spins}} while waiting."
+      - cloze: "Acquiring locks in the same global order everywhere prevents deadlock by removing the {{c1::circular wait}} condition."
+    feynman:
+      - "Explain to a teammate why a multi-threaded counter gives the wrong total without a lock."
+      - "Walk through how a futex avoids both the waste of spinning and the cost of always entering the kernel."
+      - "You suspect a deadlock between two services sharing two locks. Explain how you'd confirm it and the simplest code change to prevent it."
+    labs:
+      - title: "Make a race, then fix it"
+        slug: lab-race-and-lock
+        difficulty: challenge
+        est_minutes: 30
+        scenario: |
+          The fastest way to believe in race conditions is to cause one. You'll write
+          a tiny program where many threads increment a shared counter, watch the
+          total come out wrong, then make it correct with a lock — and reason about
+          why.
+        deliverable: |
+          1. Write a program (Python or C) with N threads that each increment a shared
+             counter M times, with no lock. Run it several times; record the final
+             total versus the expected N×M.
+          2. Add a lock/mutex around the increment and show the total is now always
+             correct.
+          3. (Stretch) Build a 2-lock deadlock: two threads grabbing locks A and B in
+             opposite order. Observe the hang, then fix it by enforcing one global
+             lock order.
+          4. Write 3–4 sentences explaining, in terms of load/add/store interleaving,
+             why step 1 lost updates.
+        hints: |
+          - In CPython the GIL hides small races; force interleaving by splitting the
+            increment into steps (read to a local, `time.sleep(0)`, write back) or use
+            C/pthreads for a true race.
+          - Deadlock: thread 1 locks A then B; thread 2 locks B then A; a short sleep
+            between the two acquisitions makes the hang reliable.
+          - Fix: make *both* threads acquire A before B.
+        solution: |
+          Without a lock the threads interleave between the load and the store of the
+          counter, so increments are lost and the total is below N×M (and varies run to
+          run). Wrapping the increment in a mutex makes it a critical section — only one
+          thread reads-modifies-writes at a time — so the total is always exactly N×M.
+          The deadlock hangs because each thread holds one lock and waits for the other
+          (circular wait); acquiring both locks in the same global order (always A then
+          B) makes a cycle impossible, so it cannot deadlock.
+
+  - title: "Storage devices and disk I/O"
+    slug: storage-devices-io
+    order: 4
+    est_minutes: 28
+    summary: "How HDDs and SSDs actually store data — disk geometry, seek/rotation, disk scheduling, and why flash (with its FTL) behaves completely differently."
+    body: |
+      ## The disk is just an array of sectors
+
+      To the OS, any drive is an address space of fixed-size **sectors**
+      (traditionally 512 bytes; modern drives use 4 KB "Advanced Format"), numbered
+      0…n−1. The OS reads and writes blocks by number — but *how long that takes*
+      depends entirely on the physical medium underneath.
+
+      ## Inside a hard disk drive (HDD)
+
+      A stack of spinning **platters** on a **spindle** (7,200–15,000 RPM); each
+      magnetic surface is divided into concentric **tracks** of sectors, and a
+      **head** on a moving arm reads or writes. So the time for one I/O has three
+      parts:
+
+      > **T_I/O = T_seek + T_rotation + T_transfer**
+      > (move the arm to the track) + (wait for the sector to rotate under the head)
+      > + (transfer the bytes)
+
+      For a **random** I/O, seek and rotation dominate (milliseconds) while transfer
+      is tiny — which is why HDDs are excellent at **sequential** access and poor at
+      **random** access. A 10,000 RPM drive takes ~6 ms per rotation, so one random
+      seek+rotation can cost several ms — an eternity next to RAM's nanoseconds.
+
+      ## Disk scheduling
+
+      Because *positioning* is the cost, the OS and the drive **reorder** pending
+      requests to minimize head movement:
+
+      - **SSTF** (shortest-seek-time-first) — always serve the nearest request; fast,
+        but far-away requests can **starve**.
+      - **SCAN / C-SCAN — the "elevator"** — sweep steadily across the disk in one
+        direction, serving requests on the way; avoids starvation, like an elevator
+        that doesn't reverse for every new button press.
+
+      ```bash
+      lsblk -d -o NAME,ROTA,SIZE           # ROTA=1 spinning disk, 0 = SSD
+      cat /sys/block/sda/queue/scheduler   # the active Linux I/O scheduler
+      ```
+
+      ## Solid-state drives (SSDs) are a different world
+
+      Flash has **no moving parts**, so random access is *uniformly fast* — there is
+      no seek and no rotation. But flash has its own strict rules, and those rules
+      shape everything above it (see "Under the hood").
+    deep_dive: |
+      ### Why an SSD can't just overwrite a block — flash, the FTL, and TRIM
+
+      **Flash's three asymmetric operations.** A flash chip is divided into
+      **blocks** (the *erase* unit, often 128–256 KB), each holding many **pages**
+      (the read/write unit, often 4 KB). You can **read** a page quickly and
+      **program** (write) a page quickly — *but only into a page that has first been
+      erased*, and **erase only works on a whole block** and is slow. The killer
+      constraint: **you cannot overwrite a page in place**; rewriting one 4 KB page
+      would otherwise mean erasing its entire surrounding block. Cells also **wear
+      out** after a limited number of program/erase cycles, so hammering one location
+      destroys it.
+
+      **The FTL hides all of this.** Every SSD runs a **Flash Translation Layer**
+      that presents the OS a normal array-of-sectors interface while internally
+      behaving like a **log-structured** store: writes go to fresh, already-erased
+      pages and a mapping table remaps each logical sector to its current physical
+      page. That turns random overwrites into sequential programming (fast and
+      flash-friendly) and enables **wear leveling** — spreading writes across all
+      blocks so none dies early. The cost is **garbage collection**: stale, overwritten
+      pages pile up, so the FTL must periodically copy the still-live pages out of a
+      block and erase it to reclaim space — work that causes occasional latency spikes
+      and **write amplification** (more physical writes than the OS asked for).
+
+      **Why TRIM matters.** When you delete a file the filesystem frees blocks, but
+      the SSD has no idea — it still treats that stale data as live and dutifully
+      copies it during GC. The **TRIM** command (Linux: `fstrim`, or the `discard`
+      mount option) tells the drive "these logical blocks are now garbage," so GC can
+      skip them — less write amplification, longer life. It's also why SSDs use the
+      `none`/`noop` I/O scheduler: reordering requests to shorten seeks is pointless
+      when there is no seek.
+    cards:
+      - front: "What three components make up the time for one HDD I/O?"
+        back: "Seek time (move the arm to the track) + rotational delay (wait for the sector to spin under the head) + transfer time (move the bytes). For random I/O, seek + rotation dominate."
+      - front: "Why are HDDs good at sequential but poor at random access?"
+        back: "Sequential access keeps the head roughly in place, so transfer dominates. Random access pays a costly seek + rotational delay (milliseconds) for almost every request."
+      - front: "What is the elevator (SCAN) disk scheduler, and what does it fix over SSTF?"
+        back: "SCAN/C-SCAN sweeps steadily across the disk in one direction, serving requests on the way, like an elevator. It avoids the starvation that pure shortest-seek-first (SSTF) can cause for far-away requests."
+      - front: "Why can't an SSD overwrite a page in place?"
+        back: "Flash can only program an already-erased page, and erase works on a whole block (many pages). So overwriting one page would require erasing its entire block first — instead the FTL writes a new page elsewhere and remaps."
+      - front: "What does the Flash Translation Layer (FTL) do?"
+        back: "It presents the OS a normal sector interface while internally writing log-structured to fresh erased pages, remapping logical→physical, running garbage collection to reclaim blocks, and wear leveling to spread writes so cells don't die unevenly."
+      - front: "What is TRIM and why does it help SSDs?"
+        back: "TRIM (Linux: fstrim / the discard option) tells the SSD which logical blocks the filesystem has freed, so garbage collection can skip that dead data — cutting write amplification and extending the drive's life."
+      - cloze: "On flash, the read/program unit is a {{c1::page}}, but the erase unit is a whole {{c2::block}}."
+      - cloze: "Spreading writes evenly so no flash cell wears out early is called {{c1::wear leveling}}."
+      - cloze: "`lsblk -d -o NAME,ROTA` shows ROTA={{c1::1}} for a spinning disk and {{c2::0}} for an SSD."
+    feynman:
+      - "Explain why a single random read on a hard disk can take several milliseconds while the same read from RAM takes nanoseconds."
+      - "Walk a colleague through what physically happens inside an SSD when you 'overwrite' a 4 KB file repeatedly."
+      - "Why does enabling TRIM / running fstrim improve an SSD's longevity and performance?"
+    labs:
+      - title: "Profile your storage stack"
+        slug: lab-storage-profile
+        difficulty: core
+        est_minutes: 25
+        scenario: |
+          Find out what kind of storage your machine actually has and how the kernel
+          treats it, then reason about sequential versus random performance.
+        deliverable: |
+          1. Identify each drive's type: `lsblk -d -o NAME,ROTA,SIZE,MODEL`
+             (ROTA 1 = spinning HDD, 0 = SSD).
+          2. Show the active I/O scheduler: `cat /sys/block/<dev>/queue/scheduler` —
+             note which is selected (in [brackets]).
+          3. If you have an SSD, check TRIM with a dry run: `sudo fstrim -av`
+             (or `lsblk --discard`).
+          4. Watch live I/O while copying a large file: run `iostat -x 1` (or `iotop`)
+             in one terminal and a `cp`/`dd` in another.
+          5. Write 4–5 sentences: for your drive type, which of seek/rotation/transfer
+             (or none, for flash) dominates, and why the chosen scheduler makes sense.
+        hints: |
+          - `<dev>` is e.g. `sda` or `nvme0n1` (no partition number).
+          - Common schedulers: `none`/`noop` (SSD/NVMe), `mq-deadline`, `bfq`.
+          - `iostat` is in the `sysstat` package; `r/s` and `w/s` are reads/writes per
+            second and `await` is average latency.
+        solution: |
+          `ROTA 0` (or an `nvme` name) means flash: access is uniformly fast with no
+          seek/rotation, so the kernel sensibly picks `none`/`noop` — reordering to cut
+          seek time is pointless. `ROTA 1` is a spinning disk whose random latency is
+          dominated by seek + rotational delay, so an elevator-style scheduler
+          (`mq-deadline`/`bfq`) that orders requests by position pays off. `fstrim`
+          reports bytes trimmed — blocks the FTL can now skip during garbage collection.
+          Under `iostat`, a sequential `dd` shows high throughput and low `await`, while
+          scattered random I/O on an HDD shows much lower throughput and higher `await`
+          because of all the head movement.
+
+quiz:
+  title: "Operating System Internals — chapter exam"
+  slug: lpic1-os-internals-exam
+  scope: chapter
+  description: "Virtual memory and paging, CPU scheduling, and concurrency."
+  questions:
+    - type: mcq
+      text: "What does giving each process its own virtual address space primarily provide?"
+      explanation: "Isolation (plus a simple uniform model and the ability to overcommit RAM) — processes cannot name each other's memory."
+      choices:
+        - {text: "Isolation between processes and a simple uniform memory model", correct: true}
+        - {text: "Faster CPU clock speeds"}
+        - {text: "Larger disk capacity"}
+        - {text: "Automatic multithreading"}
+    - type: fill_in
+      text: "The MMU cache that stores recent virtual-to-physical address translations is the ____."
+      explanation: "The TLB (Translation Lookaside Buffer) makes paging fast by avoiding a page-table walk on every access."
+      answers:
+        - {value: "TLB"}
+        - {value: "translation lookaside buffer"}
+    - type: true_false
+      text: "More swapping always means better performance."
+      explanation: "False — heavy swapping (thrashing) collapses performance because disk is far slower than RAM."
+      choices:
+        - {text: "True"}
+        - {text: "False", correct: true}
+    - type: mcq
+      text: "Touching a page whose present bit is 0 causes what?"
+      explanation: "A page fault traps into the kernel, which loads the page and restarts the instruction."
+      choices:
+        - {text: "A page fault", correct: true}
+        - {text: "A context switch"}
+        - {text: "A deadlock"}
+        - {text: "A TLB hit"}
+    - type: mcq
+      text: "The convoy effect — a long job stalling short ones behind it — is a problem of which policy?"
+      explanation: "FIFO runs in arrival order, so a long job at the front delays everything."
+      choices:
+        - {text: "FIFO", correct: true}
+        - {text: "Round-robin"}
+        - {text: "Shortest-job-first"}
+        - {text: "MLFQ"}
+    - type: mcq
+      text: "Which scheduler serves normal (SCHED_OTHER) tasks on Linux, and what does it optimize?"
+      explanation: "CFS tracks virtual runtime and runs the task with the least, sharing the CPU proportionally."
+      choices:
+        - {text: "CFS — proportional fairness via virtual runtime", correct: true}
+        - {text: "SJF — shortest job first"}
+        - {text: "FIFO — arrival order"}
+        - {text: "Lottery — random tickets only"}
+    - type: command
+      text: "Change the niceness of the running process with PID 1234 to 10."
+      explanation: "`renice` adjusts a running process's niceness (CFS priority)."
+      answers:
+        - {value: "(sudo )?renice (-n )?10 -p 1234", match: regex}
+        - {value: "(sudo )?renice (-n )?10 1234", match: regex}
+    - type: mcq
+      text: "Two threads run `counter = counter + 1` with no lock. What's the bug?"
+      explanation: "The statement is load/add/store; interleaving between load and store loses an update — a race condition."
+      choices:
+        - {text: "A race condition: it isn't atomic, so updates are lost", correct: true}
+        - {text: "A memory leak"}
+        - {text: "A page fault"}
+        - {text: "A deadlock"}
+    - type: mcq
+      text: "Which technique prevents deadlock by removing the circular-wait condition?"
+      explanation: "Acquiring locks in one consistent global order means no cycle of waiting can form."
+      choices:
+        - {text: "A global lock-acquisition order", correct: true}
+        - {text: "Spinning instead of sleeping"}
+        - {text: "Increasing the time slice"}
+        - {text: "Adding more threads"}
+    - type: fill_in
+      text: "Name the atomic CPU instruction (give one) used to build a correct lock."
+      explanation: "test-and-set or compare-and-swap (CAS) read and write a word in one indivisible step."
+      answers:
+        - {value: "compare-and-swap"}
+        - {value: "compare and swap"}
+        - {value: "CAS"}
+        - {value: "test-and-set"}
+        - {value: "test and set"}
+    - type: mcq
+      text: "For a single random read on a spinning hard disk, which part of the I/O time usually dominates?"
+      explanation: "Seek + rotational delay (positioning the head) cost milliseconds; the actual data transfer is tiny by comparison."
+      choices:
+        - {text: "Seek time and rotational delay", correct: true}
+        - {text: "Transfer time"}
+        - {text: "TLB lookup"}
+        - {text: "Garbage collection"}
+    - type: mcq
+      text: "Why can't an SSD overwrite a 4 KB page in place?"
+      explanation: "Flash can only program an erased page, and erase works on a whole block — so the FTL writes elsewhere and remaps instead."
+      choices:
+        - {text: "A page can only be programmed after its whole block is erased", correct: true}
+        - {text: "Pages are read-only once written forever"}
+        - {text: "The OS forbids overwriting any file"}
+        - {text: "SSDs have no spare capacity"}
+    - type: command
+      text: "Tell the SSD which freed blocks it can reclaim — trim every mounted filesystem (verbose)."
+      explanation: "`fstrim -av` issues TRIM/discard for all mounted filesystems, helping the FTL's garbage collection."
+      answers:
+        - {value: "(sudo )?fstrim -av", match: regex}
+        - {value: "(sudo )?fstrim -va", match: regex}
+        - {value: "(sudo )?fstrim --all --verbose", match: regex}

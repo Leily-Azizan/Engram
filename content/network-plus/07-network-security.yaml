@@ -1,0 +1,272 @@
+chapter:
+  title: "Network Security"
+  slug: network-security
+  order: 7
+  summary: "Firewalls, segmentation, VPNs, common attacks, and the defensive mindset."
+
+lessons:
+  - title: "Firewalls, segmentation, and VPNs"
+    slug: firewalls-vpns
+    order: 1
+    est_minutes: 24
+    summary: "Controlling traffic with firewalls, isolating zones, and securing remote access."
+    body: |
+      ## Firewalls — controlling traffic
+
+      A firewall allows or blocks traffic by rules (source/dest IP, port,
+      protocol, state). Two broad types:
+
+      - **Stateless** — judges each packet alone (simple ACLs).
+      - **Stateful** — tracks connections, so replies to allowed outbound
+        traffic are permitted automatically. (This is what you usually want.)
+
+      On Linux, the kernel firewall is **netfilter**, driven by **nftables**
+      (modern) or **iptables** (classic); **ufw** and **firewalld** are friendly
+      front-ends.
+
+      ```bash
+      sudo ufw default deny incoming
+      sudo ufw allow 22/tcp           # SSH
+      sudo ufw allow 443/tcp          # HTTPS
+      sudo ufw enable
+      sudo ufw status verbose
+      ```
+
+      Best practice: **default deny**, then allow only what's needed (whitelist).
+
+      ## Segmentation and the DMZ
+
+      Put internet-facing servers (web, mail) in a **DMZ** — a segment isolated
+      from the internal LAN, so a compromised public server can't pivot inside.
+      VLANs and firewall zones enforce this.
+
+      ## VPNs
+
+      A **VPN** creates an encrypted tunnel across an untrusted network:
+
+      - **Site-to-site** — links two offices' networks.
+      - **Remote-access** (client VPN) — a laptop dials into the corporate net.
+      - Tech: **IPsec**, **WireGuard**, **OpenVPN**. TLS underlies HTTPS-based
+        VPNs.
+    deep_dive: |
+      ### Connection tracking, and why a VPN tunnel is just encryption + encapsulation
+
+      **A stateful firewall keeps a connection table.** When an allowed outbound TCP
+      connection starts (it sees the SYN), it records the 4-tuple `(srcIP, srcPort,
+      dstIP, dstPort)` and the connection's state. Return packets are matched
+      against that table and allowed **automatically** — which is why you only write
+      a rule for the *initiating* direction. It also understands TCP state (only a
+      valid SYN starts a new flow; stray ACKs to no known connection are dropped),
+      giving protection a stateless ACL (which judges each packet in isolation)
+      can't. On Linux this is **netfilter/conntrack**; `iptables`/`nftables`/`ufw`
+      are front-ends writing rules the kernel evaluates per packet. NAT (chapter 2)
+      uses the *same* connection table to reverse its address rewrites for replies.
+
+      **"Default deny" is an information-theoretic choice.** A blocklist must
+      enumerate every bad thing (impossible — you'll always miss one); an allowlist
+      enumerates the few good things and rejects the infinite rest. So default-deny
+      + explicit allows minimises attack surface by construction, which is why it's
+      the rule, not a preference.
+
+      **A VPN is encryption + encapsulation.** It takes your normal IP packets,
+      **encrypts** them, and wraps them inside *new* packets addressed to the VPN
+      peer (encapsulation — the same nesting idea as OSI, but adding a crypto layer).
+      - **IPsec** operates at L3 (ESP encrypts the payload; IKE negotiates keys);
+        common for site-to-site tunnels joining two networks.
+      - **WireGuard/OpenVPN** create a virtual interface; traffic routed to it is
+        encrypted and tunneled. WireGuard is a lean, modern design (fast, small).
+      The result: an attacker on the path between the two endpoints sees only
+      ciphertext to the VPN peer — defeating the man-in-the-middle eavesdropping
+      from the attacks lesson, exactly because confidentiality is enforced
+      cryptographically rather than by trusting the network.
+
+      **Segmentation/DMZ** is the architectural layer on top: even with firewalls,
+      you split the network (VLANs + firewall zones) so a breached public server
+      can't reach the internal LAN — containment, so one failure isn't total.
+    cards:
+      - front: "Stateful vs stateless firewall — the difference?"
+        back: "A stateful firewall tracks connection state (so return traffic for allowed sessions is permitted automatically); a stateless one evaluates each packet in isolation."
+      - front: "What is the 'default deny' principle?"
+        back: "Block everything by default and explicitly allow only the traffic you need (whitelisting) — minimizes attack surface."
+      - front: "What is a DMZ and why use it?"
+        back: "An isolated network segment for internet-facing servers, so that if one is compromised the attacker can't reach the internal LAN."
+      - front: "Name two VPN deployment types."
+        back: "Site-to-site (links two networks) and remote-access/client VPN (a user device into a network). Tech: IPsec, WireGuard, OpenVPN."
+      - cloze: "On Linux the kernel firewall is {{c1::netfilter}}, configured via nftables/iptables with friendly front-ends like {{c2::ufw}} or firewalld."
+    feynman:
+      - "Explain why 'default deny' is safer than 'default allow with a blocklist'."
+      - "Describe how a DMZ limits the blast radius of a compromised web server."
+    labs:
+      - title: "Write a host firewall policy"
+        slug: lab-firewall-policy
+        difficulty: core
+        est_minutes: 20
+        scenario: |
+          You're hardening a public web server that you also administer over SSH.
+          Nothing else should be reachable from the internet.
+        deliverable: |
+          Using ufw, write the commands to:
+          1. Default-deny inbound, default-allow outbound.
+          2. Allow SSH (22) and HTTPS (443) only.
+          3. Enable the firewall and show the resulting rules.
+          4. Explain why you don't need an explicit rule to allow the *replies* to
+             your outbound traffic.
+        hints: |
+          - `ufw default deny incoming` / `allow outgoing`
+          - Stateful tracking handles replies.
+        solution: |
+          ```bash
+          sudo ufw default deny incoming
+          sudo ufw default allow outgoing
+          sudo ufw allow 22/tcp
+          sudo ufw allow 443/tcp
+          sudo ufw enable
+          sudo ufw status verbose
+          ```
+          The firewall is **stateful**: it tracks outbound connections, so the
+          return packets are automatically permitted without a separate rule.
+
+  - title: "Common attacks and defenses"
+    slug: attacks-and-defenses
+    order: 2
+    est_minutes: 18
+    summary: "The attacks Network+ expects you to recognise, and how to blunt them."
+    body: |
+      ## Know the threats
+
+      | Attack | What it is | Defense |
+      |--------|-----------|---------|
+      | DoS / DDoS | Flood a target to exhaust it | Rate limiting, scrubbing, CDN/anycast |
+      | MITM | Attacker sits between two parties | Encryption (TLS), cert validation |
+      | ARP spoofing | Fake ARP replies redirect LAN traffic | Dynamic ARP inspection, static ARP |
+      | DNS spoofing | Forged DNS answers | DNSSEC, trusted resolvers |
+      | Phishing / social engineering | Trick a human | Training, MFA |
+      | Brute force | Guess credentials | Lockouts, key auth, MFA, fail2ban |
+      | VLAN hopping | Escape a VLAN | Disable auto-trunk, proper config |
+
+      ## The CIA triad
+
+      Security aims to protect **Confidentiality** (only authorised access),
+      **Integrity** (data not tampered), and **Availability** (it's there when
+      needed). Most controls map to one of these.
+
+      ## Defense in depth
+
+      Layer controls so no single failure is fatal: firewall **and** segmentation
+      **and** least privilege **and** patching **and** monitoring **and** MFA.
+    deep_dive: |
+      ### How three classic attacks actually work — and why their defenses do
+
+      Understanding the mechanism makes the defense obvious instead of memorised.
+
+      **ARP spoofing (LAN man-in-the-middle).** On a LAN, hosts find each other's
+      MAC via **ARP**, which is unauthenticated: "who has 192.168.1.1? tell me." An
+      attacker simply **replies with their own MAC**, poisoning victims' ARP caches
+      so traffic for the gateway flows through the attacker first. There's no
+      cryptography in ARP, so the network layer can't stop it — which is *why* the
+      real defense is **end-to-end encryption (TLS)**: even if the attacker sits in
+      the path, they see ciphertext. Switch features like **Dynamic ARP Inspection**
+      help, but "encrypt everything" is the durable answer.
+
+      **DNS spoofing.** If an attacker can forge a DNS reply (or poison a resolver's
+      cache), they send you to their server for a real-looking name. Defenses:
+      trusted resolvers, and **DNSSEC**, which **cryptographically signs** DNS
+      records so forged answers fail signature validation — authentication applied
+      to name resolution (DNS lesson).
+
+      **DDoS.** Many machines flood a target to exhaust bandwidth, connection
+      tables, or CPU — attacking **Availability**. You can't "patch" it away; you
+      **absorb and filter**: rate limiting, upstream scrubbing, and **anycast/CDN**
+      so the load is spread across many edge locations instead of one origin.
+
+      **The CIA triad is the lens.** Every attack targets **C**onfidentiality
+      (eavesdrop/steal), **I**ntegrity (tamper), or **A**vailability (deny service),
+      and every control maps to defending one: encryption→C, signatures/hashes→I,
+      redundancy/rate-limiting→A. **Defense in depth** then assumes any single
+      control fails: TLS *and* DNSSEC *and* network segmentation *and* MFA *and*
+      patching *and* monitoring — so one breach isn't catastrophic. That's the same
+      layered-containment principle as a DMZ, applied to the whole system: no single
+      wall, many walls.
+    cards:
+      - front: "What are the three goals of the CIA triad?"
+        back: "Confidentiality, Integrity, Availability."
+      - front: "What is a man-in-the-middle (MITM) attack and the main defense?"
+        back: "An attacker secretly relays/alters traffic between two parties; defend with encryption (TLS) and certificate validation."
+      - front: "What is 'defense in depth'?"
+        back: "Layering multiple independent controls so that if one fails, others still protect you (firewall + segmentation + least privilege + patching + monitoring + MFA)."
+      - cloze: "A {{c1::DDoS}} attack aims to exhaust a target's resources (harming {{c2::availability}} in the CIA triad)."
+      - cloze: "{{c1::ARP}} spoofing redirects LAN traffic with forged replies; {{c2::DNSSEC}} helps defend against forged DNS answers."
+    feynman:
+      - "Map three attacks to the CIA element they primarily threaten."
+      - "Explain defense in depth using a castle-with-many-walls analogy."
+    labs:
+      - title: "Threat-model a login form"
+        slug: lab-threat-model
+        difficulty: challenge
+        est_minutes: 20
+        scenario: |
+          A public web app has an internet-facing login page. Management asks for
+          a quick threat model.
+        deliverable: |
+          1. List three plausible attacks against it.
+          2. For each, name a concrete defense.
+          3. Map each attack to the CIA element it threatens most.
+        hints: |
+          - Brute force, MITM, DDoS, phishing...
+          - Defenses: TLS, MFA, rate limiting/fail2ban, lockouts.
+        solution: |
+          | Attack | Defense | CIA |
+          |--------|---------|-----|
+          | Brute-force credential guessing | MFA + account lockout + fail2ban | Confidentiality |
+          | MITM on the login | Enforce HTTPS/HSTS, valid certs | Confidentiality/Integrity |
+          | DDoS on the endpoint | Rate limiting + CDN/anycast | Availability |
+          | Phishing for credentials | User training + MFA | Confidentiality |
+
+quiz:
+  title: "Network Security — chapter exam"
+  slug: netplus-network-security-exam
+  scope: chapter
+  description: "Firewalls, VPNs, attacks, and CIA."
+  questions:
+    - type: mcq
+      text: "Which firewall type automatically permits replies to allowed outbound connections?"
+      explanation: "A stateful firewall tracks connection state."
+      choices:
+        - {text: "Stateful", correct: true}
+        - {text: "Stateless"}
+        - {text: "Proxy-only"}
+        - {text: "Host-based only"}
+    - type: fill_in
+      text: "The security triad is Confidentiality, Integrity, and ____________."
+      explanation: "Availability completes the CIA triad."
+      answers: ["Availability"]
+    - type: mcq
+      text: "Which principle says 'block everything, then allow only what's needed'?"
+      explanation: "Default deny / whitelisting minimizes attack surface."
+      choices:
+        - {text: "Default deny", correct: true}
+        - {text: "Default allow"}
+        - {text: "Security through obscurity"}
+        - {text: "Fail open"}
+    - type: mcq
+      text: "A DDoS attack primarily threatens which CIA element?"
+      explanation: "Flooding exhausts resources, harming Availability."
+      choices:
+        - {text: "Availability", correct: true}
+        - {text: "Confidentiality"}
+        - {text: "Integrity"}
+        - {text: "Authentication"}
+    - type: true_false
+      text: "Placing internet-facing servers in a DMZ helps contain a breach."
+      explanation: "True — the DMZ isolates them from the internal LAN."
+      choices:
+        - {text: "True", correct: true}
+        - {text: "False"}
+    - type: mcq
+      text: "Which is the best defense against a man-in-the-middle attack?"
+      explanation: "Encryption with certificate validation (TLS) stops eavesdropping/tampering."
+      choices:
+        - {text: "TLS encryption with cert validation", correct: true}
+        - {text: "Hiding the SSID"}
+        - {text: "Using HTTP"}
+        - {text: "Disabling the firewall"}

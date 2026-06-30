@@ -1,0 +1,39 @@
+{% extends 'base.html' %}
+{% block title %}Review · Engram{% endblock %}
+{% block topbar %}Review{% endblock %}
+{% block content %}
+<h1>🔁 Review</h1>
+<p class="subtitle">{{ counts.due }} due · {{ counts.new }} new today. Grade yourself honestly — that's what makes the schedule work.</p>
+
+{% if card %}
+<div class="card flashcard">
+  <div class="muted" style="font-size:13px;">
+    <a href="{{ card.lesson.get_absolute_url }}">{{ card.lesson.chapter.course.name }} · {{ card.lesson.title }}</a>
+  </div>
+  <div class="face">{{ card.prompt_html|safe }}</div>
+
+  <details>
+    <summary>Show answer</summary>
+    <div class="face prose" style="margin-top:16px;">{{ card.answer_html|safe }}</div>
+
+    <form method="post" action="{% url 'review_answer' %}">
+      {% csrf_token %}
+      <input type="hidden" name="flashcard_id" value="{{ card.id }}">
+      <p class="muted" style="margin-top:18px; font-size:13px;">How well did you recall it?</p>
+      <div class="grade-row">
+        <button class="btn" name="grade" value="again" style="border-color:#dc2626;color:#dc2626;">Again</button>
+        <button class="btn" name="grade" value="hard">Hard</button>
+        <button class="btn primary" name="grade" value="good">Good</button>
+        <button class="btn good" name="grade" value="easy">Easy</button>
+      </div>
+    </form>
+  </details>
+</div>
+<p class="center muted" style="font-size:13px;">Tip: try to answer out loud before revealing.</p>
+{% else %}
+<div class="card empty">
+  🎉 Nothing due right now. Your memory is up to date.<br><br>
+  <a class="btn primary" href="{% url 'session' %}">Back to today's session</a>
+</div>
+{% endif %}
+{% endblock %}

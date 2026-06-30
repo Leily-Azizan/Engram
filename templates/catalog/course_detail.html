@@ -1,0 +1,44 @@
+{% extends 'base.html' %}
+{% load content_extras %}
+{% block title %}{{ course.name }} · Engram{% endblock %}
+{% block topbar %}{{ course.name }}{% endblock %}
+{% block content %}
+<div class="crumbs"><a href="{% url 'course_list' %}">Courses</a> / {{ course.name }}</div>
+<h1>{{ course.icon }} {{ course.name }}</h1>
+<p class="subtitle">{{ course.description }}</p>
+
+<form method="get" action="{% url 'search' %}" class="form-row" style="max-width:480px;">
+  <input type="hidden" name="course" value="{{ course.slug }}">
+  <input type="text" name="q" placeholder="🔎 Search this course — topics & commands (e.g. chmod, LVM)…">
+</form>
+
+<div class="card">
+  <div style="display:flex; justify-content:space-between;">
+    <strong>Overall progress</strong>
+    <span class="muted">{{ progress.learned }}/{{ progress.total }} · {{ progress.pct }}%</span>
+  </div>
+  <div class="bar good"><span style="width:{{ progress.pct }}%"></span></div>
+</div>
+
+{% for row in chapter_rows %}
+  <div class="card">
+    <div style="display:flex; justify-content:space-between; align-items:baseline;">
+      <h3 style="margin:0;"><a href="{{ row.chapter.get_absolute_url }}">{{ row.chapter.title }}</a></h3>
+      <span class="badge {% if row.pct == 100 %}emerald{% elif row.learned %}amber{% else %}slate{% endif %}">{{ row.learned }}/{{ row.total }}</span>
+    </div>
+    {% if row.chapter.summary %}<p class="muted" style="margin:6px 0 10px;">{{ row.chapter.summary }}</p>{% endif %}
+    <ul class="list">
+      {% for lesson in row.lessons %}
+        <li>
+          <a href="{{ lesson.get_absolute_url }}">{{ lesson.title }}</a>
+          {% with st=status_map|default_if_none:'' %}
+            <span class="badge {{ status_map|get_item:lesson.id|status_color }}">{{ status_map|get_item:lesson.id|status_label }}</span>
+          {% endwith %}
+        </li>
+      {% endfor %}
+    </ul>
+  </div>
+{% empty %}
+  <div class="empty">No chapters yet.</div>
+{% endfor %}
+{% endblock %}

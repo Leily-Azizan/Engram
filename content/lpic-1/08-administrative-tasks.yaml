@@ -1,0 +1,250 @@
+chapter:
+  title: "Administrative Tasks"
+  slug: administrative-tasks
+  order: 8
+  summary: "Manage users and groups, schedule jobs with cron/at, and handle locale and time zones."
+
+lessons:
+  - title: "Manage users and groups"
+    slug: users-and-groups
+    order: 1
+    est_minutes: 22
+    summary: "The account files and the commands to create, modify, and remove users and groups."
+    body: |
+      ## Where accounts live
+
+      | File | Holds |
+      |------|-------|
+      | `/etc/passwd` | user accounts (name, UID, GID, home, shell) |
+      | `/etc/shadow` | password hashes & aging (root-only) |
+      | `/etc/group` | groups and their members |
+
+      A `/etc/passwd` line: `leily:x:1000:1000:Leily:/home/leily:/bin/bash`
+      (the `x` means the hash is in `/etc/shadow`).
+
+      ## Managing users
+
+      ```bash
+      sudo useradd -m -s /bin/bash sara   # create with home dir + shell
+      sudo passwd sara                    # set a password
+      sudo usermod -aG sudo sara          # ADD to a group (keep existing!)
+      sudo userdel -r sara                # delete + remove home
+      ```
+
+      ⚠️ Always use `usermod -aG` (append). Plain `-G` *replaces* a user's
+      supplementary groups and can lock them out of `sudo`.
+
+      ## Managing groups
+
+      ```bash
+      sudo groupadd devs
+      sudo gpasswd -a sara devs           # add member
+      groups sara                         # show a user's groups
+      id sara                             # UID, GID, and all groups
+      ```
+    deep_dive: |
+      ### The kernel only knows numbers; names and groups are bolted on top
+
+      **UID is the real identity; the name is cosmetic.** The kernel enforces
+      permissions purely on numeric **UID/GID** stored in each process's
+      credentials — it has never heard of "leily". The mapping name→UID lives in
+      `/etc/passwd` and is resolved in *userspace* by the NSS library, which is why
+      two accounts sharing UID 0 are both root regardless of name, and why deleting
+      a user leaves files showing a bare number. A process actually carries
+      **real, effective, and saved** UIDs, the split that lets `sudo` and setuid
+      programs switch privilege precisely.
+
+      **Passwords are salted hashes, not encryption.** `/etc/shadow` (root-only,
+      unlike world-readable `/etc/passwd`) stores `$id$salt$hash` — e.g. `$6$` for
+      SHA-512 or `$y$` for yescrypt. Login hashes your input with the stored salt
+      and compares; the salt guarantees two users with the same password get
+      different hashes, defeating precomputed rainbow tables.
+
+      **Why a new group needs a fresh login.** Your group set is resolved *once*,
+      when the session starts, and baked into the process credentials — then
+      inherited by every child via `fork()`. Adding yourself to `docker` or `sudo`
+      with `usermod -aG` updates `/etc/group`, but your *running* shell still holds
+      the old credential, so you must re-login (or `newgrp`) to pick it up.
+    cards:
+      - front: "Which file stores password hashes, and who can read it?"
+        back: "`/etc/shadow` — readable only by root (the `x` in /etc/passwd points to it)."
+      - front: "Why must you use `usermod -aG` rather than `usermod -G`?"
+        back: "`-aG` *appends* to supplementary groups; `-G` alone *replaces* them all, which can remove the user from sudo and other groups."
+      - front: "Which command shows a user's UID, GID, and all group memberships at once?"
+        back: "`id <user>`"
+      - cloze: "User accounts live in `/etc/{{c1::passwd}}`, password hashes in `/etc/{{c2::shadow}}`, and groups in `/etc/{{c3::group}}`."
+    feynman:
+      - "Explain what would go wrong if you ran `usermod -G devs leily` on your own admin account."
+    labs:
+      - title: "Onboard a teammate"
+        slug: lab-onboard-user
+        difficulty: core
+        est_minutes: 20
+        scenario: |
+          A new engineer 'sara' is joining. She needs a normal account with a
+          home directory, membership in the `devs` group, and sudo access —
+          without disturbing anyone else's group memberships.
+        deliverable: |
+          1. Create the `devs` group if needed.
+          2. Create user `sara` with a home dir and Bash shell.
+          3. Add her to `devs` and to `sudo` (append, don't replace).
+          4. Verify her UID and group memberships in one command.
+        hints: |
+          - `groupadd`, `useradd -m -s`, `usermod -aG`, `id`
+        solution: |
+          ```bash
+          sudo groupadd -f devs
+          sudo useradd -m -s /bin/bash sara
+          sudo passwd sara
+          sudo usermod -aG devs,sudo sara
+          id sara
+          ```
+
+  - title: "Schedule jobs (cron and at), locale and time"
+    slug: cron-locale-time
+    order: 2
+    est_minutes: 22
+    summary: "Recurring jobs with cron, one-off jobs with at, and getting locale/timezone right."
+    body: |
+      ## cron — recurring jobs
+
+      Edit your user crontab with `crontab -e`. Each line:
+
+      ```
+      ┌ minute (0-59)
+      │ ┌ hour (0-23)
+      │ │ ┌ day of month (1-31)
+      │ │ │ ┌ month (1-12)
+      │ │ │ │ ┌ day of week (0-7, 0/7=Sun)
+      │ │ │ │ │
+      * * * * *  command
+      ```
+
+      ```bash
+      0 2 * * *   /home/leily/backup.sh      # every day at 02:00
+      */15 * * * * /usr/local/bin/check.sh    # every 15 minutes
+      0 9 * * 1   echo "Monday standup"       # 09:00 each Monday
+      ```
+
+      System-wide jobs live in `/etc/crontab` and `/etc/cron.d/`, plus the
+      `/etc/cron.{hourly,daily,weekly,monthly}/` directories.
+
+      ## at — one-off jobs
+
+      ```bash
+      echo "systemctl restart nginx" | at 23:30
+      atq          # list pending at jobs
+      atrm 3       # remove job 3
+      ```
+
+      ## Locale and time
+
+      ```bash
+      timedatectl                       # current time, zone, NTP status
+      sudo timedatectl set-timezone Asia/Tehran
+      locale                            # current locale settings
+      date '+%F %T'                     # formatted date/time
+      ```
+    deep_dive: |
+      ### How cron fires, and what "the time" even is
+
+      **crond just wakes up and compares.** The cron daemon sleeps until the top of
+      each minute, then scans every crontab and runs the jobs whose five fields
+      match the current minute — there's no event system, only this once-a-minute
+      check, which is why cron can't do sub-minute schedules. `atd` is its one-shot
+      cousin: it runs a job once at a set time and forgets it.
+
+      **The classic "works in my shell, fails in cron" bug.** cron jobs run with a
+      *bare* environment — no `~/.bashrc`, a minimal `PATH` (often just
+      `/usr/bin:/bin`), and no terminal. A script that relies on your interactive
+      `PATH` or aliases breaks. The fix is to use absolute paths or set `PATH` at
+      the top of the script/crontab.
+
+      **System time is UTC underneath; the zone is just a lens.** Linux keeps time
+      as seconds since the 1970 epoch in **UTC**, plus a battery-backed RTC
+      hardware clock. A timezone (`/etc/localtime`, `$TZ`) is only an offset applied
+      when *displaying* time, so changing it never moves the underlying clock — it
+      just relabels it. NTP keeps that clock honest by gently **slewing** it
+      (speeding/slowing the tick) for small drifts rather than jumping, so
+      timestamps never run backwards and break logs or `make`.
+    cards:
+      - front: "In cron's five fields, what does `*/15 * * * *` mean?"
+        back: "Run every 15 minutes (every 15th minute, every hour, every day)."
+      - front: "Which command schedules a single one-off job at a given time?"
+        back: "`at` — e.g. `echo 'cmd' | at 23:30`; list with `atq`, remove with `atrm`."
+      - front: "How do you set the system timezone on a systemd machine?"
+        back: "`sudo timedatectl set-timezone <Zone>`, e.g. `Asia/Tehran`."
+      - cloze: "A crontab line `0 2 * * *` runs the job at {{c1::02:00}} every day; the five fields are minute hour day-of-month month {{c2::day-of-week}}."
+    feynman:
+      - "Explain the five cron fields and write a schedule for 'every weekday at 6pm'."
+      - "When would you use `at` instead of `cron`?"
+    labs:
+      - title: "Automate a nightly backup"
+        slug: lab-cron-backup
+        difficulty: core
+        est_minutes: 18
+        scenario: |
+          The backup script from the scripting chapter should run automatically
+          every night and log its output.
+        deliverable: |
+          1. Write a crontab entry that runs `~/backup.sh /data` every night at
+             01:30 and appends stdout+stderr to `~/backup.log`.
+          2. Show how to list your current crontab.
+          3. Write the cron line for "every weekday (Mon–Fri) at 18:00".
+        hints: |
+          - Redirect both streams: `>> ~/backup.log 2>&1`
+          - `crontab -l`
+          - Weekdays: `1-5` in the day-of-week field.
+        solution: |
+          ```bash
+          # crontab -e , then add:
+          30 1 * * *  /home/leily/backup.sh /data >> /home/leily/backup.log 2>&1
+          0 18 * * 1-5  /home/leily/standup.sh
+          # list:
+          crontab -l
+          ```
+
+quiz:
+  title: "Administrative Tasks — chapter exam"
+  slug: lpic1-admin-tasks-exam
+  scope: chapter
+  description: "Users/groups, cron/at, locale and time."
+  questions:
+    - type: mcq
+      text: "Which file contains the password hashes?"
+      explanation: "`/etc/shadow` holds hashes and aging info, readable only by root."
+      choices:
+        - {text: "/etc/shadow", correct: true}
+        - {text: "/etc/passwd"}
+        - {text: "/etc/group"}
+        - {text: "/etc/hosts"}
+    - type: command
+      text: "Add user 'sara' to the 'devs' group WITHOUT removing her other groups."
+      explanation: "`usermod -aG devs sara` appends; omit -a and you'd replace all groups."
+      answers:
+        - {value: "(sudo )?usermod -aG devs sara", match: regex}
+        - {value: "(sudo )?usermod -a -G devs sara", match: regex}
+    - type: mcq
+      text: "What does the cron schedule `*/15 * * * *` do?"
+      explanation: "Runs every 15 minutes."
+      choices:
+        - {text: "Runs every 15 minutes", correct: true}
+        - {text: "Runs at 15:00 daily"}
+        - {text: "Runs on the 15th of each month"}
+        - {text: "Runs every 15 hours"}
+    - type: command
+      text: "Show your current user's crontab entries."
+      explanation: "`crontab -l` lists the current user's crontab."
+      answers:
+        - "crontab -l"
+    - type: true_false
+      text: "`usermod -G devs sara` keeps Sara in all her previous groups and just adds devs."
+      explanation: "False — without -a it REPLACES her supplementary groups with only devs."
+      choices:
+        - {text: "True"}
+        - {text: "False", correct: true}
+    - type: command
+      text: "Set the system timezone to Asia/Tehran."
+      explanation: "`timedatectl set-timezone Asia/Tehran`."
+      answers:
+        - {value: "(sudo )?timedatectl set-timezone Asia/Tehran", match: regex}

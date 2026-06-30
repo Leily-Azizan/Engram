@@ -1,0 +1,9 @@
+slug: network-plus
+name: "Networking Fundamentals (Network+)"
+icon: "🌐"
+order: 2
+description: |
+  Vendor-neutral networking foundations aligned with CompTIA Network+. Covers
+  the OSI and TCP/IP models, IP addressing and subnetting, switching and
+  routing, common protocols and ports, network services, wireless, security,
+  and troubleshooting — the groundwork every DevOps and cloud engineer needs.

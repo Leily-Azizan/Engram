@@ -1,0 +1,338 @@
+chapter:
+  title: "Installation and Package Management"
+  slug: package-management
+  order: 2
+  summary: "Installing and managing software with Debian (apt/dpkg) and Red Hat (dnf/rpm) tooling."
+
+lessons:
+  - title: "Debian package management (apt & dpkg)"
+    slug: debian-apt-dpkg
+    order: 1
+    est_minutes: 22
+    summary: "High-level apt for repositories and dependencies, low-level dpkg for single .deb files."
+    body: |
+      ## Two layers
+
+      - **dpkg** — the low-level tool. Installs/removes a single `.deb` file but
+        does **not** resolve dependencies.
+      - **apt** — the high-level tool. Talks to repositories, resolves
+        dependencies, and calls dpkg underneath.
+
+      ### Everyday apt
+
+      ```bash
+      sudo apt update                 # refresh the package index
+      sudo apt upgrade                # install available updates
+      sudo apt install nginx          # install (with dependencies)
+      sudo apt remove nginx           # remove, keep config
+      sudo apt purge nginx            # remove + config
+      apt search keyword              # find packages
+      apt show nginx                  # package details
+      ```
+
+      `apt update` ≠ `apt upgrade`: **update** refreshes the list of what's
+      available; **upgrade** actually installs newer versions.
+
+      ### Low-level dpkg
+
+      ```bash
+      sudo dpkg -i pkg.deb            # install a local .deb
+      dpkg -l | grep nginx            # list installed packages
+      dpkg -L nginx                   # files installed by a package
+      dpkg -S /usr/sbin/nginx         # which package owns a file
+      ```
+
+      Repositories are configured in `/etc/apt/sources.list` and
+      `/etc/apt/sources.list.d/`.
+    deep_dive: |
+      ### What apt and dpkg actually maintain, and how trust works
+
+      **dpkg owns a local database.** Under `/var/lib/dpkg/` dpkg tracks every
+      installed package: `status` (what's installed and its state), and per-package
+      file lists (which is what `dpkg -L` and `dpkg -S` read). Installing a `.deb`
+      is a small state machine: **unpack** the archive's files into place, then
+      **configure** (run the package's `postinst` maintainer script). A half-
+      configured package is why you sometimes run `dpkg --configure -a`. dpkg checks
+      declared **dependencies** but, on its own, only *refuses* if they're unmet —
+      it won't fetch them.
+
+      **apt is the dependency solver + downloader on top.** `apt update` downloads
+      each repository's **package index** (the `Packages` files listing every
+      available package, version, and its dependencies) into `/var/lib/apt/lists/`.
+      That's metadata only — it changes apt's *knowledge*, installs nothing. `apt
+      install X` then runs a **SAT-like solver** over that metadata to compute a full
+      set of packages satisfying X's dependency tree (and avoiding conflicts),
+      downloads the `.deb`s, and hands them to dpkg in the right order. This is the
+      precise reason `apt` can pull in dependencies and `dpkg -i` can't: the solver
+      and the index live in apt, not dpkg.
+
+      **Why `update` ≠ `upgrade`:** update refreshes the index (what *versions
+      exist*); upgrade asks the solver to move installed packages to newer versions
+      from that index. Run upgrade without a recent update and you're solving against
+      stale metadata.
+
+      **Trust is cryptographic.** Repos ship a signed `Release` file; apt verifies
+      its **GPG signature** against keys in `/etc/apt/keyrings`/`trusted.gpg.d`, and
+      the Release file contains checksums of the indexes, which in turn contain
+      checksums of every `.deb`. So a tampered mirror or a man-in-the-middle can't
+      feed you altered packages — the signature chain (same GPG idea as the security
+      chapter) fails. That's why adding a third-party repo means importing its key.
+    cards:
+      - front: "What's the difference between `apt update` and `apt upgrade`?"
+        back: "`update` refreshes the package index (what versions exist); `upgrade` installs newer versions of installed packages."
+      - front: "dpkg can install a .deb but what can't it do that apt can?"
+        back: "Resolve and fetch dependencies. dpkg installs only the file you give it; apt pulls in everything it needs."
+      - front: "Which command tells you which package owns a given file?"
+        back: "`dpkg -S /path/to/file`"
+      - cloze: "`apt {{c1::purge}}` removes a package *and* its config files, whereas `apt {{c2::remove}}` keeps the config."
+    feynman:
+      - "Explain how apt and dpkg relate, and when you'd use each."
+    labs:
+      - title: "Investigate an installed package"
+        slug: lab-inspect-deb-package
+        difficulty: intro
+        est_minutes: 15
+        scenario: |
+          You need to understand what a package put on disk before you trust it
+          in production.
+        deliverable: |
+          For any installed package of your choice:
+          1. List the files it installed.
+          2. Find which package owns `/bin/ls` (or another known binary).
+          3. Show the package's version and description.
+        hints: |
+          - `dpkg -L`, `dpkg -S`, `apt show`
+        solution: |
+          ```bash
+          dpkg -L coreutils | head
+          dpkg -S /bin/ls          # coreutils
+          apt show coreutils
+          ```
+
+  - title: "Red Hat package management (dnf & rpm)"
+    slug: redhat-dnf-rpm
+    order: 2
+    est_minutes: 20
+    summary: "The RPM world: dnf/yum for repositories, rpm for single packages."
+    body: |
+      ## The RPM family
+
+      Mirror image of the Debian world:
+
+      - **rpm** — low-level, single `.rpm`, no dependency resolution.
+      - **dnf** (successor to **yum**) — high-level, repositories, dependencies.
+
+      ### Everyday dnf
+
+      ```bash
+      sudo dnf check-update           # what updates are available
+      sudo dnf install httpd          # install with dependencies
+      sudo dnf remove httpd           # remove
+      sudo dnf upgrade                # update everything
+      dnf search keyword
+      dnf info httpd
+      dnf provides /usr/sbin/httpd    # which package provides a file
+      ```
+
+      ### Low-level rpm
+
+      ```bash
+      sudo rpm -ivh pkg.rpm           # install (verbose, progress)
+      rpm -qa | grep httpd            # query all installed
+      rpm -ql httpd                   # list files in a package
+      rpm -qf /usr/sbin/httpd         # which package owns a file
+      ```
+
+      Repos live in `/etc/yum.repos.d/*.repo`.
+    deep_dive: |
+      ### Inside an .rpm, the RPM database, and dependency solving
+
+      **An .rpm is two parts: a header and a payload.** The header is a structured
+      table of tags — name, version, file list, dependencies (`Requires`/
+      `Provides`), and the install/remove **scriptlets** — while the payload is a
+      compressed **cpio** archive of the actual files. So `rpm -qlp` can list
+      contents without unpacking: it just reads the header. Installing runs the
+      pre-script, lays down the cpio files, then the post-script.
+
+      **The RPM database is the source of truth.** Every installed package's header
+      is recorded in `/var/lib/rpm` (a sqlite DB on modern systems, BerkeleyDB
+      historically). That's what `rpm -qa`, `rpm -qf`, and verification query —
+      *not* the live filesystem. Corrupt that DB and `rpm` forgets what's
+      installed even though the files are right there (`rpm --rebuilddb` repairs
+      it).
+
+      **dnf solves dependencies as a SAT problem.** `rpm` alone installs one file
+      and fails on a missing `Requires`. dnf reads the repo metadata, feeds all the
+      `Provides`/`Requires`/conflicts to **libsolv** — a Boolean satisfiability
+      solver — and computes a complete, consistent transaction set, then hands the
+      ordered list of .rpms to the rpm layer to apply atomically. Because the whole
+      transaction is logged, `dnf history undo` can roll it back.
+    cards:
+      - front: "Which tool replaced yum on modern Red Hat / Fedora systems?"
+        back: "`dnf` — it's the modern successor; `yum` often still works as an alias."
+      - front: "Map the Debian tools apt and dpkg to their RPM-world equivalents."
+        back: "apt ↔ dnf (high-level, repos, dependencies); dpkg ↔ rpm (low-level, single package)."
+      - front: "How do you find which RPM package owns a file?"
+        back: "`rpm -qf /path/to/file` (or `dnf provides /path`)."
+      - cloze: "`rpm {{c1::-qa}}` queries all installed packages, and `rpm {{c2::-ql}}` lists the files in a package."
+    feynman:
+      - "Compare the Debian and Red Hat package ecosystems — what maps to what?"
+    labs:
+      - title: "Cross-distro cheat sheet"
+        slug: lab-pkg-rosetta
+        difficulty: core
+        est_minutes: 20
+        scenario: |
+          Your team runs both Ubuntu and Rocky Linux. People keep forgetting the
+          equivalent commands across distros.
+        deliverable: |
+          Produce a small "rosetta" table mapping these tasks across apt and dnf:
+          install, remove, search, update index, list files of a package, find
+          owner of a file. Use real command syntax for both.
+        hints: |
+          - install: `apt install` / `dnf install`
+          - owner-of-file: `dpkg -S` / `rpm -qf`
+        solution: |
+          | Task | Debian/Ubuntu | Red Hat/Rocky |
+          |------|---------------|---------------|
+          | install | `apt install X` | `dnf install X` |
+          | remove | `apt remove X` | `dnf remove X` |
+          | search | `apt search X` | `dnf search X` |
+          | refresh index | `apt update` | `dnf check-update` |
+          | files in pkg | `dpkg -L X` | `rpm -ql X` |
+          | owner of file | `dpkg -S /path` | `rpm -qf /path` |
+
+  - title: "Manage shared libraries"
+    slug: shared-libraries
+    order: 3
+    est_minutes: 16
+    summary: "How programs find their shared libraries (.so), and the tools to inspect and fix them."
+    body: |
+      ## Why shared libraries exist
+
+      Most programs don't bundle all their code — they link against **shared
+      libraries** (`.so` files, like Windows DLLs) at runtime. This saves memory
+      and disk and lets one security fix in a library protect every program using
+      it.
+
+      Library file names encode versions: `libssl.so.3` → `libssl.so.3.0.2`.
+
+      ## Finding what a binary needs
+
+      ```bash
+      ldd /usr/bin/curl        # list the shared libraries a program needs
+      ```
+
+      If `ldd` shows `not found`, the program will fail to start — a missing or
+      unregistered library.
+
+      ## How the loader finds libraries
+
+      At startup the dynamic linker searches:
+
+      1. paths in the **`ldconfig` cache** (`/etc/ld.so.cache`),
+      2. directories listed in `/etc/ld.so.conf` and `/etc/ld.so.conf.d/`,
+      3. the `LD_LIBRARY_PATH` environment variable (override, use sparingly).
+
+      ```bash
+      sudo ldconfig            # rebuild the cache after adding a library dir
+      ldconfig -p | grep ssl   # search the cache
+      ```
+
+      So the fix for "library not found" after installing one in a custom path is
+      usually: add the dir under `/etc/ld.so.conf.d/` and run `ldconfig`.
+    deep_dive: |
+      ### How dynamic linking actually resolves at runtime
+
+      **The kernel hands the binary to an interpreter.** A dynamically linked ELF
+      executable carries a `PT_INTERP` field naming its loader — usually
+      `/lib64/ld-linux-x86-64.so.2`. On `execve()` the kernel maps that loader and
+      jumps to *it*, not your `main()`. The loader maps each needed `.so`, then
+      relocates symbol references. `ldd` is really just this loader run in a
+      "report what you'd load" mode.
+
+      **The cache exists to avoid a directory scan per launch.** Searching
+      `/etc/ld.so.conf.d/` on every program start would be slow, so `ldconfig`
+      precomputes `/etc/ld.so.cache` — a hash from soname → resolved path. That's
+      why a freshly dropped library is invisible until you run `ldconfig`: the
+      cache, not the directory, is consulted first.
+
+      **sonames make ABI versioning work.** A program records a dependency on the
+      *soname* `libssl.so.3`, a symlink to the real `libssl.so.3.0.2`. Bump the
+      patch version and the symlink moves, but the soname is unchanged, so binaries
+      keep working without relinking — the soname's major number changes only when
+      the binary interface breaks. `LD_LIBRARY_PATH` overrides this search but is
+      **ignored for setuid programs**, since letting a caller inject libraries into
+      a root binary would be a trivial privilege escalation.
+    cards:
+      - front: "Which command lists the shared libraries a program depends on?"
+        back: "`ldd <binary>` — shows each required .so and whether it was found."
+      - front: "What does `ldconfig` do?"
+        back: "Rebuilds the linker cache (`/etc/ld.so.cache`) from `/etc/ld.so.conf*` so the loader can find newly added shared libraries."
+      - front: "A program fails with a 'library not found' error after you installed it to /opt. What's the typical fix?"
+        back: "Add its lib directory under `/etc/ld.so.conf.d/` (a .conf file) and run `sudo ldconfig` (or set LD_LIBRARY_PATH as a quick override)."
+      - cloze: "`{{c1::ldd}}` lists a binary's library dependencies, and `{{c2::ldconfig}}` rebuilds the shared-library cache."
+    feynman:
+      - "Explain why shared libraries save memory and make security patching easier than static linking."
+    labs:
+      - title: "Diagnose a missing library"
+        slug: lab-shared-libs
+        difficulty: core
+        est_minutes: 15
+        scenario: |
+          A teammate compiled a tool that won't start, erroring about a missing
+          `.so`. You need to find what it needs and where the loader looks.
+        deliverable: |
+          1. List the libraries a common binary (e.g. /usr/bin/curl) depends on.
+          2. Show how to search the linker cache for a library by name.
+          3. Describe the two-step fix to register a library installed in
+             /opt/app/lib.
+        hints: |
+          - `ldd`, `ldconfig -p`, `/etc/ld.so.conf.d/`
+        solution: |
+          ```bash
+          ldd /usr/bin/curl
+          ldconfig -p | grep libcurl
+          # fix for a custom path:
+          echo "/opt/app/lib" | sudo tee /etc/ld.so.conf.d/app.conf
+          sudo ldconfig
+          ```
+
+quiz:
+  title: "Package Management — chapter exam"
+  slug: lpic1-package-management-exam
+  scope: chapter
+  description: "apt/dpkg and dnf/rpm."
+  questions:
+    - type: mcq
+      text: "Which command refreshes the list of available packages on Debian/Ubuntu?"
+      explanation: "`apt update` refreshes the index; it does not install anything."
+      choices:
+        - {text: "apt update", correct: true}
+        - {text: "apt upgrade"}
+        - {text: "apt refresh"}
+        - {text: "dpkg -i"}
+    - type: mcq
+      text: "You have a single .deb file and no internet. Which tool installs it (without resolving deps)?"
+      explanation: "`dpkg -i` installs a local .deb; it won't fetch dependencies."
+      choices:
+        - {text: "dpkg -i file.deb", correct: true}
+        - {text: "apt search"}
+        - {text: "rpm -i"}
+        - {text: "dnf install"}
+    - type: command
+      text: "On Red Hat, find which package provides /usr/sbin/httpd (rpm query form)."
+      explanation: "`rpm -qf <file>` reports the owning package."
+      answers:
+        - "rpm -qf /usr/sbin/httpd"
+    - type: true_false
+      text: "dnf is the modern successor to yum."
+      explanation: "True — dnf replaced yum on Fedora/RHEL-family systems."
+      choices:
+        - {text: "True", correct: true}
+        - {text: "False"}
+    - type: command
+      text: "Completely remove the nginx package including its configuration files (Debian)."
+      explanation: "`apt purge` removes the package and its config."
+      answers:
+        - {value: "(sudo )?apt(-get)? purge nginx", match: regex}

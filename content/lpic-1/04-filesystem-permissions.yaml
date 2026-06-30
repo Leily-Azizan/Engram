@@ -1,0 +1,459 @@
+chapter:
+  title: "Filesystem, FHS and Permissions"
+  slug: filesystem-permissions
+  order: 4
+  summary: "Where things live (FHS), how to find files, and how Linux permissions and ownership work."
+
+lessons:
+  - title: "The Filesystem Hierarchy and finding files"
+    slug: fhs-and-find
+    order: 1
+    est_minutes: 20
+    summary: "The standard directory layout and the tools to locate anything."
+    body: |
+      ## A place for everything (FHS)
+
+      The Filesystem Hierarchy Standard defines what each top-level directory is
+      for. The ones you'll touch constantly:
+
+      | Path | Purpose |
+      |------|---------|
+      | `/bin`, `/usr/bin` | essential & user commands |
+      | `/sbin`, `/usr/sbin` | system administration binaries |
+      | `/etc` | system-wide configuration (text files) |
+      | `/var` | variable data — logs, spools, caches |
+      | `/home` | users' home directories |
+      | `/tmp` | temporary files (often cleared on boot) |
+      | `/dev` | device nodes |
+      | `/proc`, `/sys` | virtual kernel filesystems |
+      | `/opt` | optional / third-party software |
+
+      ### Finding files
+
+      ```bash
+      find /etc -name "*.conf"            # by name, live search
+      find /var/log -type f -mtime -1     # files modified in last 24h
+      find / -size +100M 2>/dev/null      # files bigger than 100MB
+      locate nginx.conf                   # fast, from an index (updatedb)
+      which python3                       # an executable in $PATH
+      ```
+
+      `find` walks the tree *now* (accurate, slower); `locate` queries a
+      prebuilt database (fast, may be stale — refresh with `sudo updatedb`).
+    deep_dive: |
+      ### Why `find` is slow and `locate` is instant
+
+      **`find` walks the tree with syscalls.** It `opendir()`/`readdir()`s each
+      directory for its entries, then — for filters like `-mtime`, `-size`,
+      `-type` — calls `stat()` on *every single file* to read its inode metadata.
+      On a tree with millions of files that's millions of syscalls, each a
+      potential disk seek. That's the price of being always-accurate: it reads the
+      live filesystem. `-name` matches the cheap directory entry; the expensive
+      part is any test that needs the inode. `-xdev` stops it crossing mount
+      points, since each mounted filesystem is a separate inode space.
+
+      **`locate` trades freshness for speed.** It never touches the tree at query
+      time — it greps a prebuilt index (`/var/lib/mlocate/mlocate.db`) that a daily
+      cron job (`updatedb`) rebuilds by doing the expensive walk *once*. So results
+      are instant but only as current as the last `updatedb`; a file made an hour
+      ago won't show up until you refresh the database.
+
+      **Why the FHS looks redundant.** `/bin` vs `/usr/bin`, `/lib` vs `/usr/lib`
+      date to when `/usr` lived on a separate (sometimes network) disk mounted
+      *after* boot, so anything needed to boot had to sit in `/`. Modern distros do
+      the "usr merge": `/bin` is now just a symlink into `/usr/bin`, and the split
+      is historical rather than functional.
+    cards:
+      - front: "Which directory holds system-wide configuration files?"
+        back: "`/etc` — plain-text configuration for the system and installed services."
+      - front: "What lives under `/var`?"
+        back: "Variable data that changes at runtime: logs (`/var/log`), spools, caches, mail, etc."
+      - front: "Difference between `find` and `locate`?"
+        back: "`find` searches the live filesystem (accurate, slower); `locate` reads a prebuilt index (fast, can be stale until `updatedb`)."
+      - cloze: "`find /var/log -type f -mtime {{c1::-1}}` finds files modified within the last day."
+    feynman:
+      - "Why does putting logs in /var and config in /etc make a system easier to back up and reason about?"
+    labs:
+      - title: "Disk detective"
+        slug: lab-disk-detective
+        difficulty: core
+        est_minutes: 20
+        scenario: |
+          A partition is filling up and you must find the culprits fast.
+        deliverable: |
+          1. Find the 5 largest files under `/var`.
+          2. Find files anywhere modified in the last 24 hours.
+          3. Show total disk usage per top-level directory of `/`.
+        hints: |
+          - `find /var -type f -printf '%s %p\n' | sort -rn | head -5`
+          - `find / -mtime -1 -type f 2>/dev/null`
+          - `du -sh /*` (run with sudo)
+        solution: |
+          ```bash
+          find /var -type f -printf '%s %p\n' 2>/dev/null | sort -rn | head -5
+          find / -type f -mtime -1 2>/dev/null
+          sudo du -sh /* 2>/dev/null | sort -rh | head
+          ```
+
+  - title: "Permissions and ownership"
+    slug: permissions-ownership
+    order: 2
+    est_minutes: 25
+    summary: "rwx for user/group/other, octal modes, chmod/chown, and special bits."
+    body: |
+      ## Reading a permission string
+
+      ```
+      -rwxr-xr--  1 leily devs  4096 Jun 27 10:00 deploy.sh
+       │└┬┘└┬┘└┬┘     │    │
+       │ │  │  └ other: r--   (read)
+       │ │  └─── group: r-x   (read, execute)
+       │ └────── user : rwx   (read, write, execute)
+       └ type: - file, d dir, l symlink
+      ```
+
+      Each of **user / group / other** gets **r(4) w(2) x(1)**.
+
+      ### Octal modes
+
+      Add the bits per class:
+
+      | Octal | Symbolic | Meaning |
+      |-------|----------|---------|
+      | 7 | rwx | read+write+execute |
+      | 6 | rw- | read+write |
+      | 5 | r-x | read+execute |
+      | 4 | r-- | read only |
+
+      ```bash
+      chmod 755 deploy.sh        # rwxr-xr-x
+      chmod 640 secret.conf      # rw-r-----
+      chmod u+x script.sh        # add execute for the user (symbolic)
+      chmod -R g+w project/      # recursive
+      ```
+
+      ### Ownership
+
+      ```bash
+      chown leily file           # change owner
+      chown leily:devs file      # owner and group
+      chgrp devs file            # change group only
+      ```
+
+      ### What rwx means on a directory
+
+      On a **directory**: `r` = list names, `w` = create/delete entries,
+      `x` = enter/traverse it. You usually need `x` to do anything useful inside.
+    deep_dive: |
+      ### Where permissions live and how the kernel checks them
+
+      **The bits are in the inode.** A file's `st_mode` is a 16-bit field in its
+      inode: 4 bits for type (file/dir/symlink…), 3 special bits (setuid, setgid,
+      sticky), and the 9 `rwx` bits you edit with `chmod`. Ownership is two
+      separate inode fields — `st_uid` and `st_gid` — which is exactly why `chown`
+      is a different operation from `chmod`: different fields entirely.
+
+      **The check is first-match, not most-permissive.** On every `open()` the
+      kernel decides access in a fixed order: if you're root, allow (the famous
+      bypass); else if your UID matches the owner, use *only* the owner bits and
+      stop; else if you're in the file's group, use *only* the group bits and
+      stop; else use the other bits. Because it stops at the first matching class,
+      an owner with `r--` is denied write *even if* group and other have `rw-` — a
+      classic "but everyone else can write it!" gotcha.
+
+      **umask and directory `x`.** New files aren't born `rwx` for all; the kernel
+      masks the requested mode with your `umask` (`mode & ~umask`), so `022` clears
+      group/other write. And `x` on a directory is really *search* permission: the
+      kernel needs it to resolve a path component, so without it you can't even
+      `stat` a file inside whose exact name you already know.
+    cards:
+      - front: "What octal mode gives rwxr-xr-x?"
+        back: "755 — user 7 (rwx), group 5 (r-x), other 5 (r-x)."
+      - front: "What do r, w, and x mean on a *directory* (not a file)?"
+        back: "r = list contents, w = create/delete entries, x = enter/traverse the directory."
+      - front: "How do you set owner *and* group in one command?"
+        back: "`chown owner:group file`"
+      - cloze: "In `chmod 640`, the permissions are `{{c1::rw-}}` for user, `{{c2::r--}}` for group, and `---` for other."
+      - cloze: "The read bit is worth `{{c1::4}}`, write `{{c2::2}}`, and execute `{{c3::1}}`."
+    feynman:
+      - "Explain why a user might be able to read a file's name but not its contents (dir vs file permissions)."
+      - "Translate `chmod 750` into who-can-do-what."
+    labs:
+      - title: "Lock down a deploy key"
+        slug: lab-lock-down-key
+        difficulty: core
+        est_minutes: 20
+        scenario: |
+          You're placing an SSH private key and a deploy script on a server. SSH
+          will refuse a key that's too permissive, and the script should be
+          runnable by the deploy group but not world-writable.
+        deliverable: |
+          1. Set the private key so only its owner can read/write it (no group/other).
+          2. Make the deploy script executable by owner and group, readable by all.
+          3. Give the files to owner `deploy` and group `devs`.
+          State the octal modes you chose and why.
+        hints: |
+          - SSH wants the key at 600.
+          - "executable by owner+group, readable by all" = 754.
+          - `chown deploy:devs`
+        solution: |
+          ```bash
+          chmod 600 id_deploy          # rw------- : only owner
+          chmod 754 deploy.sh          # rwxr-xr-- : owner all, group r-x, other r
+          sudo chown deploy:devs id_deploy deploy.sh
+          ```
+          600 keeps the secret private (SSH requires this); 754 lets the team run
+          the script without making it world-writable.
+
+  - title: "Manage files and links"
+    slug: files-and-links
+    order: 3
+    est_minutes: 22
+    summary: "Copy/move/remove files, use wildcards, and understand hard vs symbolic links."
+    body: |
+      ## Everyday file operations
+
+      ```bash
+      cp a.txt b.txt          # copy
+      cp -r dir/ backup/      # copy a directory recursively
+      mv old.txt new.txt      # move/rename
+      rm file ; rm -r dir/    # remove (careful — no trash!)
+      mkdir -p a/b/c          # make nested dirs
+      touch file              # create empty / update timestamp
+      ```
+
+      ### Globbing (wildcards)
+
+      The shell expands patterns before the command runs:
+
+      | Pattern | Matches |
+      |---------|---------|
+      | `*` | any string (`*.log`) |
+      | `?` | one character (`file?.txt`) |
+      | `[abc]` | one of a, b, c |
+      | `{a,b}` | brace expansion → `a` and `b` |
+
+      ## Hard links vs symbolic links
+
+      A file's real data is an **inode**; a filename is just a directory entry
+      pointing to an inode.
+
+      - **Hard link** — another *name* for the same inode. Same data, same
+        permissions; deleting one name leaves the data while any name remains.
+        Can't cross filesystems or link directories.
+      - **Symbolic (soft) link** — a tiny file that *points to a path*. Can cross
+        filesystems and link directories, but **breaks** if the target moves/—
+        deletes (dangling link).
+
+      ```bash
+      ln target hardlink        # hard link
+      ln -s /path/target symlink  # symbolic link
+      ls -li                      # -i shows inode numbers (hard links share one)
+      ```
+    deep_dive: |
+      ### Inodes, link counts, and why `rm` doesn't erase data
+
+      **A name and its data are separate.** A file's content and metadata live in
+      an **inode** (numbered, per-filesystem); a directory is just a table mapping
+      names → inode numbers (a *dentry* in the kernel's cache). A **hard link** is
+      simply a second name pointing at the same inode, so `ls -li` shows them
+      sharing one inode number. The inode tracks a **link count** (`st_nlink`) of
+      how many names point to it.
+
+      **`rm` is really `unlink()`.** It removes one directory entry and decrements
+      the link count — it does *not* scrub the bytes. The data blocks are freed
+      only when the count hits 0 **and** no process still holds the file open. That
+      second clause is the "deleted the log but the disk is still full" mystery: a
+      running service holding a deleted file keeps its blocks alive until it closes
+      the fd or restarts. It's also why deleted data stays recoverable until
+      overwritten.
+
+      **Why the two link types differ.** A hard link can't cross filesystems or
+      target a directory, because inode numbers are unique only *within* one
+      filesystem (and directory hard links would create loops the tools can't
+      untangle). A **symlink** sidesteps both: it's a tiny inode whose data is
+      literally the target *path string*, resolved fresh by the kernel at `open()`
+      time — so it spans filesystems but dangles the moment the target moves.
+    cards:
+      - front: "Hard link vs symbolic link — the core difference?"
+        back: "A hard link is another name for the same inode (same data; survives as long as any name exists). A symlink is a pointer to a *path* (can cross filesystems and link dirs, but breaks if the target is removed)."
+      - front: "Which link type can cross filesystems and link to a directory?"
+        back: "A symbolic (soft) link. Hard links cannot cross filesystems or link directories."
+      - front: "How can you tell two filenames are hard links to the same data?"
+        back: "`ls -li` shows the inode number — hard links share the same inode (and the link count > 1)."
+      - cloze: "`ln target name` makes a {{c1::hard}} link; `ln -s target name` makes a {{c2::symbolic}} link."
+      - cloze: "A file's data lives in an {{c1::inode}}; a filename is just a directory entry pointing to it."
+    feynman:
+      - "Explain inodes and why deleting one hard link doesn't delete the data."
+      - "Why does a symlink 'break' but a hard link doesn't when the original name is removed?"
+    labs:
+      - title: "Links in practice"
+        slug: lab-links
+        difficulty: core
+        est_minutes: 15
+        scenario: |
+          You want to understand, hands-on, how hard and soft links behave when the
+          original file is deleted.
+        deliverable: |
+          1. Create a file with content; make a hard link and a symlink to it.
+          2. Show all three share/point correctly (inode numbers).
+          3. Delete the ORIGINAL filename. Which link still works? Why?
+        hints: |
+          - `ln`, `ln -s`, `ls -li`, `cat`
+        solution: |
+          ```bash
+          echo "data" > orig.txt
+          ln orig.txt hard.txt
+          ln -s orig.txt soft.txt
+          ls -li orig.txt hard.txt soft.txt   # orig & hard share an inode
+          rm orig.txt
+          cat hard.txt    # still "data" — inode survives via the hard link
+          cat soft.txt    # error: dangling symlink (target path gone)
+          ```
+
+  - title: "Archive, compress and copy data"
+    slug: archiving-compression
+    order: 4
+    est_minutes: 20
+    summary: "Bundle with tar, shrink with gzip/bzip2/xz, and clone at the block level with dd."
+    body: |
+      ## tar — bundle many files into one archive
+
+      ```bash
+      tar -cvf backup.tar dir/       # Create Verbose to File
+      tar -tvf backup.tar            # lisT contents
+      tar -xvf backup.tar            # eXtract
+      tar -czvf backup.tar.gz dir/   # create + gzip compress (z)
+      tar -xzvf backup.tar.gz        # extract a gzipped tar
+      tar -xzvf backup.tar.gz -C /restore/   # extract to a target dir
+      ```
+
+      Mnemonic for create: **c**reate **z**ip **v**erbose **f**ile = `czvf`.
+      Compression flags: `z` = gzip, `j` = bzip2, `J` = xz.
+
+      ## Standalone compression
+
+      ```bash
+      gzip big.log        # → big.log.gz (removes original)   gunzip to reverse
+      bzip2 big.log       # better ratio, slower
+      xz big.log          # best ratio, slowest               unxz to reverse
+      ```
+
+      Trade-off: gzip is fast, xz compresses smallest. Pick by whether CPU or
+      space matters more.
+
+      ## dd — block-level copy
+
+      ```bash
+      sudo dd if=/dev/sda of=/dev/sdb bs=4M status=progress   # clone a disk
+      sudo dd if=image.iso of=/dev/sdb bs=4M                  # write a USB image
+      ```
+
+      ⚠️ dd is "disk destroyer" — it writes raw blocks with no confirmation.
+      Double-check `if=` (input) and `of=` (output) before pressing Enter.
+    deep_dive: |
+      ### Archiving vs compressing vs raw copying — three different layers
+
+      **tar is a *stream* of blocks, not a compressor.** A tar archive is each
+      file's 512-byte metadata header (name, mode, owner, mtime, size) followed by
+      its data, padded to 512-byte boundaries, ending in zero blocks. That linear
+      layout is why it's a "tape archive" — built to stream straight onto tape —
+      and why it pipes so naturally. tar preserves the Unix permissions and
+      ownership a plain `zip` would drop, which is what makes it the right tool
+      for backups and system transfers.
+
+      **Compression is a separate, optional stage.** The `z`/`j`/`J` flags just
+      pipe the tar stream through gzip/bzip2/xz. gzip uses DEFLATE (LZ77 finds
+      repeated byte sequences, Huffman coding shortens frequent symbols); xz uses
+      LZMA with a far larger dictionary — smaller output, much more CPU and RAM.
+      So a `.tar.gz` is two independent operations: *archive*, then *compress*.
+
+      **dd ignores files entirely.** It opens a **block device** like `/dev/sda`
+      and copies raw sectors in `bs`-sized chunks, with no notion of files or
+      filesystems — which is why it can clone a partition table or a boot sector a
+      file copy can't, and why a wrong `of=` instantly overwrites a live disk. A
+      bigger `bs` means fewer, larger reads/writes (faster, up to a point);
+      `conv=fsync` forces the data out of cache onto the platters before dd reports
+      done.
+    cards:
+      - front: "What does `tar -czvf backup.tar.gz dir/` do?"
+        back: "Creates a gzip-compressed tar archive of dir/. c=create, z=gzip, v=verbose, f=file."
+      - front: "Compression flags: which tar option is gzip vs bzip2 vs xz?"
+        back: "`z` = gzip, `j` = bzip2, `J` = xz."
+      - front: "gzip vs xz — the trade-off?"
+        back: "gzip is fast with a modest ratio; xz compresses the smallest but is slowest/CPU-heavy. bzip2 is in between."
+      - front: "In `dd`, what do `if=` and `of=` mean, and why is dd dangerous?"
+        back: "`if=` input file/device, `of=` output. dd writes raw blocks with no confirmation, so a swapped of= can wipe the wrong disk."
+      - cloze: "To extract a gzipped tarball you run `tar -{{c1::xzvf}} file.tar.gz`, and to extract into a specific directory you add `{{c2::-C}} /path`."
+    feynman:
+      - "Explain the difference between *archiving* (tar) and *compressing* (gzip) — why are they separate steps?"
+    labs:
+      - title: "Back up and restore a directory"
+        slug: lab-tar-backup
+        difficulty: core
+        est_minutes: 18
+        scenario: |
+          You need a compressed snapshot of a project folder and must prove you can
+          restore it elsewhere.
+        deliverable: |
+          1. Create a gzip-compressed tar of a directory.
+          2. List its contents without extracting.
+          3. Extract it into a different directory and verify the files are there.
+          4. Separately, compress a single large log with the smallest-size tool.
+        hints: |
+          - tar czvf ; tar tzvf ; tar xzvf -C ; xz
+        solution: |
+          ```bash
+          tar -czvf project.tar.gz project/
+          tar -tzvf project.tar.gz
+          mkdir -p /tmp/restore && tar -xzvf project.tar.gz -C /tmp/restore
+          ls -R /tmp/restore
+          xz big.log          # smallest ratio (→ big.log.xz)
+          ```
+
+quiz:
+  title: "Filesystem & Permissions — chapter exam"
+  slug: lpic1-filesystem-permissions-exam
+  scope: chapter
+  description: "FHS, finding files, and permissions/ownership."
+  questions:
+    - type: mcq
+      text: "Which directory is the standard location for system-wide configuration?"
+      explanation: "`/etc` holds text configuration for the system and services."
+      choices:
+        - {text: "/etc", correct: true}
+        - {text: "/var"}
+        - {text: "/opt"}
+        - {text: "/proc"}
+    - type: command
+      text: "Give the octal chmod command to set deploy.sh to rwxr-xr-x."
+      explanation: "rwxr-xr-x = 755."
+      answers:
+        - "chmod 755 deploy.sh"
+    - type: mcq
+      text: "On a directory, what does the execute (x) bit allow?"
+      explanation: "x lets you enter/traverse the directory and access entries within it."
+      choices:
+        - {text: "Enter/traverse the directory", correct: true}
+        - {text: "Run the directory as a program"}
+        - {text: "Delete the directory"}
+        - {text: "Nothing — x is ignored on directories"}
+    - type: command
+      text: "Change a file's owner to 'leily' and group to 'devs' in one command."
+      explanation: "`chown owner:group file` sets both at once."
+      answers:
+        - {value: "(sudo )?chown leily:devs .+", match: regex}
+    - type: mcq
+      text: "Which tool searches a prebuilt index and is fast but can be stale?"
+      explanation: "`locate` uses a database refreshed by `updatedb`; `find` walks the live tree."
+      choices:
+        - {text: "locate", correct: true}
+        - {text: "find"}
+        - {text: "grep"}
+        - {text: "which"}
+    - type: true_false
+      text: "The octal mode 640 means rw-r----- (owner read/write, group read, others nothing)."
+      explanation: "True — 6=rw-, 4=r--, 0=---."
+      choices:
+        - {text: "True", correct: true}
+        - {text: "False"}

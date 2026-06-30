@@ -1,0 +1,308 @@
+chapter:
+  title: "Networking and Docker Compose"
+  slug: networking-and-compose
+  order: 5
+  summary: "How containers talk to each other and the world, and how Compose runs multi-container apps."
+
+lessons:
+  - title: "Container networking"
+    slug: container-networking
+    order: 1
+    est_minutes: 22
+    summary: "Network drivers, publishing ports, and service discovery by name."
+    body: |
+      ## The default: the bridge network
+
+      By default each container joins a **bridge** network and gets a private IP
+      (e.g. 172.17.x.x). Containers on the **same user-defined bridge** can reach
+      each other **by name**; the outside world can't, unless you publish a port.
+
+      ```bash
+      docker network ls                       # bridge, host, none + yours
+      docker network create appnet            # a user-defined bridge
+      docker run -d --name db --network appnet postgres
+      docker run -d --name web --network appnet -p 8080:80 myweb
+      # 'web' can reach the DB at host 'db' (Docker DNS), no IP needed
+      ```
+
+      ## Publishing ports
+
+      `-p HOST:CONTAINER` maps a host port to a container port:
+
+      ```bash
+      docker run -p 8080:80 nginx     # host 8080 -> container 80
+      docker run -P nginx             # publish all EXPOSEd ports to random host ports
+      ```
+
+      ## Network drivers
+
+      | Driver | Behaviour |
+      |--------|-----------|
+      | `bridge` | default; private network + NAT to the host |
+      | `host` | container shares the host's network stack (no isolation) |
+      | `none` | no networking |
+      | `overlay` | multi-host networking (Swarm/clusters) |
+
+      Key rule: **user-defined bridges give automatic DNS by container name**; the
+      default `bridge` does not (you'd need legacy `--link`). Always create a
+      network for multi-container apps.
+    deep_dive: |
+      ### What "publish a port" actually does: veth, bridge, iptables
+
+      A container's network namespace (chapter 1) starts empty — no interfaces but
+      loopback. Docker wires it up like this:
+
+      1. It creates a **veth pair** — a virtual cable with two ends. One end goes
+         **inside** the container's net namespace (you see it as `eth0`); the other
+         stays on the host and is plugged into the **`docker0` bridge** (a virtual
+         switch). Every container on that bridge is a "port" on the same switch, so
+         they can reach each other at layer 2/3 directly.
+      2. The container gets an IP from the bridge's subnet (172.17.0.0/16 by
+         default) and a default route via the bridge → that's its path out.
+      3. **Egress (container → internet)** uses **NAT**: an iptables MASQUERADE rule
+         in the `nat` table rewrites the container's private source IP to the host's
+         IP, so replies can find their way back — exactly the NAT concept from the
+         Network+ course, applied locally.
+      4. **Ingress (`-p 8080:80`)** installs a **DNAT** rule: traffic hitting the
+         host's port 8080 is rewritten to `containerIP:80` and forwarded. A
+         userland `docker-proxy` process also listens as a fallback. So "publishing"
+         is literally a port-forward via iptables, not the container "opening" a
+         host port.
+
+      **Service discovery by name** works because Docker runs an **embedded DNS
+      server** (at 127.0.0.11 inside each container) for every *user-defined*
+      network. When `web` looks up `db`, that resolver returns the container's
+      current bridge IP. This is why you reference services by name in Compose and
+      never hardcode IPs — and why the default `bridge` (which lacks this DNS) makes
+      you fall back to brittle `--link`.
+
+      **`--network host`** skips all of this: the container shares the host's net
+      namespace, so its ports *are* the host's ports (no veth, no NAT, no `-p`).
+      Faster, but no isolation and port collisions with the host — a deliberate
+      trade-off, not a default.
+
+      So container networking is the same Linux networking you already know
+      (bridges, veth, routing, iptables/NAT, DNS) composed automatically per
+      container — there's no Docker-specific network magic, just orchestration of
+      kernel primitives.
+    cards:
+      - front: "On a user-defined bridge network, how do containers reach each other?"
+        back: "By container/service name, resolved by Docker's embedded DNS (127.0.0.11) — no need to know IPs. The default `bridge` lacks this."
+      - front: "What does `-p 8080:80` actually set up under the hood?"
+        back: "An iptables DNAT rule (plus docker-proxy) forwarding host port 8080 to the container's IP:80 — a port-forward, not the container binding a host port."
+      - front: "How does a container reach the internet from a private 172.17.x.x address?"
+        back: "NAT: an iptables MASQUERADE rule rewrites the container's private source IP to the host's IP so replies route back."
+      - front: "What is a veth pair's role in container networking?"
+        back: "It's a virtual cable: one end is the container's eth0 (in its net namespace), the other plugs into the docker0 bridge (virtual switch) on the host."
+      - front: "What does `--network host` change?"
+        back: "The container shares the host's network namespace — its ports are the host's ports (no veth/NAT/-p), gaining speed but losing isolation."
+      - cloze: "Docker connects a container to the `{{c1::docker0}}` bridge via a {{c2::veth}} pair, and publishes ports with iptables {{c3::DNAT}} rules."
+    feynman:
+      - "Explain how 'web' finds 'db' by name without any configured IP."
+      - "Walk through what the kernel does when a packet leaves a container for the internet."
+    labs:
+      - title: "Two containers talking by name"
+        slug: lab-container-dns
+        difficulty: core
+        est_minutes: 20
+        scenario: |
+          A web app must reach a Redis container by name on a private network, and
+          be reachable from your browser — but Redis must NOT be exposed publicly.
+        deliverable: |
+          1. Create a user-defined bridge network.
+          2. Run Redis on it (no published port).
+          3. Run a container on the same network and ping/connect to `redis` by name.
+          4. Confirm Redis is NOT reachable from the host directly. Explain why the
+             name resolves but the port isn't public.
+        hints: |
+          - `docker network create`; only publish the web port.
+          - `docker exec web getent hosts redis`
+        solution: |
+          ```bash
+          docker network create appnet
+          docker run -d --name redis --network appnet redis
+          docker run -it --rm --network appnet busybox sh -c "getent hosts redis; nc -z redis 6379 && echo reachable"
+          # from the host:
+          nc -z localhost 6379 || echo "not published -> not reachable"
+          ```
+          The name resolves via Docker's embedded DNS on `appnet`; the port isn't
+          public because no `-p` DNAT rule was created for Redis.
+
+  - title: "Multi-container apps with Compose"
+    slug: docker-compose
+    order: 2
+    est_minutes: 20
+    summary: "Declare a whole app — services, networks, volumes — in one YAML file."
+    body: |
+      ## One file describes the whole app
+
+      **Docker Compose** declares multiple services and runs them together. A
+      `compose.yaml`:
+
+      ```yaml
+      services:
+        web:
+          build: .
+          ports:
+            - "8080:80"
+          environment:
+            - DATABASE_URL=postgres://db:5432/app
+          depends_on:
+            - db
+        db:
+          image: postgres:16
+          environment:
+            - POSTGRES_PASSWORD=secret
+          volumes:
+            - pgdata:/var/lib/postgresql/data
+
+      volumes:
+        pgdata:
+      ```
+
+      ```bash
+      docker compose up -d        # build + start everything
+      docker compose ps           # status
+      docker compose logs -f web  # logs for one service
+      docker compose down         # stop + remove (add -v to drop volumes)
+      ```
+
+      ## What Compose does for you
+
+      - Creates a **dedicated network** so services reach each other by **service
+        name** (`web` connects to `db` at host `db`).
+      - Creates named **volumes** declared under `volumes:`.
+      - Recreates only changed services on `up`.
+
+      `depends_on` controls **start order**, not readiness — use a healthcheck or
+      retry logic if `web` must wait until `db` is actually accepting connections.
+    deep_dive: |
+      ### Compose is orchestration over the same primitives
+
+      Compose doesn't add new runtime capabilities — it's a declarative front-end
+      that calls the same Docker APIs you'd call by hand, with sensible defaults:
+
+      - **Project + naming:** Compose namespaces everything by *project* (default:
+        the directory name). Containers become `myapp-web-1`, the network
+        `myapp_default`, volumes `myapp_pgdata`. That namespacing is how `up` knows
+        what already exists and reconciles to the desired state instead of
+        duplicating.
+      - **Automatic network = free DNS:** because every service joins the project's
+        user-defined bridge, the embedded DNS resolves service names to current
+        container IPs (the mechanism from the previous lesson). That's why your app
+        config says `db:5432`, not an IP — and it keeps working when the db
+        container is recreated with a new IP.
+      - **Declarative reconciliation:** `up` diffs the file against running state and
+        only recreates services whose config/image changed (it hashes the service
+        config into a label). This is the same idea CI/CD and Kubernetes scale up —
+        you describe desired state, the tool converges to it.
+
+      **`depends_on` is the classic trap.** It orders *startup* (start `db`'s
+      container before `web`'s), but a started Postgres container isn't the same as
+      a Postgres *ready to accept connections* — it may still be initializing. So
+      `web` can come up, try to connect, and crash. The real fixes are: a
+      **healthcheck** on `db` plus `depends_on: { db: { condition:
+      service_healthy } }`, or making `web` **retry** its connection (the robust,
+      cloud-native approach — never assume a dependency is instantly ready). This
+      is the distributed-systems lesson Compose teaches in miniature: order is not
+      readiness.
+    cards:
+      - front: "What does `docker compose up` create besides the containers?"
+        back: "A dedicated project network (so services resolve each other by name) and any named volumes declared under `volumes:`."
+      - front: "In Compose, how does the `web` service reach the `db` service?"
+        back: "By the service name `db` as a hostname — Compose's project network has embedded DNS that resolves it to db's current container IP."
+      - front: "Does `depends_on` wait until a dependency is ready to serve?"
+        back: "No — it only controls *start order*. Readiness needs a healthcheck (condition: service_healthy) or retry logic in the app."
+      - front: "How does `compose up` avoid recreating unchanged services?"
+        back: "It diffs the file against running state (config hashed into a label) and recreates only services whose image/config changed."
+      - cloze: "Compose namespaces resources by {{c1::project}} (default: the directory name); `docker compose {{c2::down}}` stops and removes them."
+    feynman:
+      - "Explain why you reference a database as `db:5432` in Compose instead of an IP."
+      - "Why might a `web` service crash on startup even though `depends_on: [db]` is set?"
+    labs:
+      - title: "Stand up a web + db stack"
+        slug: lab-compose-stack
+        difficulty: challenge
+        est_minutes: 28
+        scenario: |
+          Ship a small app and its Postgres database as one Compose stack that a
+          teammate can start with a single command — and that survives restarts.
+        deliverable: |
+          1. Write a compose.yaml with a `web` service (any image that serves HTTP)
+             and a `db` (postgres) with a named volume.
+          2. Put them on the default project network; have `web` reference `db` by
+             name via an env var.
+          3. `up -d`, verify both run, and that `web` can resolve `db`.
+          4. `down` then `up` again and show the db data persisted (volume).
+        hints: |
+          - services:, volumes:, depends_on:, environment:
+          - `docker compose exec web getent hosts db`
+        solution: |
+          ```yaml
+          services:
+            web:
+              image: nginx
+              ports: ["8080:80"]
+              depends_on: [db]
+            db:
+              image: postgres:16
+              environment: [POSTGRES_PASSWORD=secret]
+              volumes: ["pgdata:/var/lib/postgresql/data"]
+          volumes:
+            pgdata:
+          ```
+          ```bash
+          docker compose up -d
+          docker compose exec web getent hosts db   # resolves to db's IP
+          docker compose down            # data persists in pgdata
+          docker compose up -d           # same data on restart
+          ```
+
+quiz:
+  title: "Networking & Compose — chapter exam"
+  slug: docker-networking-compose-exam
+  scope: chapter
+  description: "Container networking and Docker Compose."
+  questions:
+    - type: mcq
+      text: "On a user-defined bridge, how do containers find each other?"
+      explanation: "By name, via Docker's embedded DNS."
+      choices:
+        - {text: "By container/service name (embedded DNS)", correct: true}
+        - {text: "Only by IP address"}
+        - {text: "Via the host's /etc/hosts"}
+        - {text: "They cannot communicate"}
+    - type: command
+      text: "Create a user-defined bridge network named appnet."
+      explanation: "`docker network create appnet`"
+      answers:
+        - {value: "docker network create appnet", match: exact}
+        - {value: "docker network create -d bridge appnet", match: exact}
+    - type: mcq
+      text: "`-p 8080:80` works by installing what?"
+      explanation: "An iptables DNAT rule forwarding host:8080 to container:80."
+      choices:
+        - {text: "An iptables DNAT (port-forward) rule", correct: true}
+        - {text: "A new kernel module"}
+        - {text: "A bind mount"}
+        - {text: "A DNS record only"}
+    - type: true_false
+      text: "`depends_on` guarantees the dependency is ready to accept connections before the dependent starts."
+      explanation: "False — it only orders startup; use healthchecks or retries for readiness."
+      choices:
+        - {text: "True"}
+        - {text: "False", correct: true}
+    - type: command
+      text: "Start a Compose stack in the background from compose.yaml in the current dir."
+      explanation: "`docker compose up -d`"
+      answers:
+        - {value: "docker compose up -d", match: exact}
+        - {value: "docker-compose up -d", match: exact}
+    - type: mcq
+      text: "What does `--network host` do?"
+      explanation: "The container shares the host's network stack — no isolation, no -p needed."
+      choices:
+        - {text: "Shares the host's network namespace (no isolation)", correct: true}
+        - {text: "Disables all networking"}
+        - {text: "Creates an overlay network"}
+        - {text: "Publishes every port automatically"}

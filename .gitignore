@@ -1,0 +1,49 @@
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# --- Virtualenv / packaging -------------------------------------------------
+.venv/
+venv/
+env/
+
+# --- Django -----------------------------------------------------------------
+db.sqlite3
+db.sqlite3-journal
+*.sqlite3
+/staticfiles/
+/media/
+local_settings.py
+
+# --- Secrets / environment --------------------------------------------------
+.env
+.env.*
+*.pem
+
+# --- Tests / type-checking / coverage ---------------------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Editors / IDEs ---------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- OS ---------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+
+# --- Logs -------------------------------------------------------------------
+*.log
+
+# --- Claude Code local files (keep personal config out of a public repo) ----
+.claude/settings.local.json

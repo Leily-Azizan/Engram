@@ -1,0 +1,531 @@
+chapter:
+  title: "Devices, Disks and Filesystems"
+  slug: devices-disks-filesystems
+  order: 5
+  summary: "Partition disks, create and mount filesystems, keep them healthy, and scale storage with LVM and RAID."
+
+lessons:
+  - title: "Partitions and creating filesystems"
+    slug: partitions-and-filesystems
+    order: 1
+    est_minutes: 26
+    summary: "Partition tables (MBR vs GPT), the tools to slice a disk, and making a filesystem on it."
+    body: |
+      ## From raw disk to usable storage
+
+      A new disk is just blocks. To use it you usually: **partition** it →
+      **create a filesystem** → **mount** it.
+
+      ### Partition tables: MBR vs GPT
+
+      | | MBR | GPT |
+      |-|-----|-----|
+      | Max disk | 2 TB | huge (zettabytes) |
+      | Partitions | 4 primary (or 3 + extended) | 128+ |
+      | Firmware | BIOS (legacy) | UEFI (modern) |
+
+      Prefer **GPT** on anything modern.
+
+      ### Partitioning tools
+
+      ```bash
+      lsblk                 # see disks/partitions first
+      sudo fdisk /dev/sdb   # MBR/GPT interactive editor
+      sudo gdisk /dev/sdb   # GPT-focused
+      sudo parted /dev/sdb  # scriptable, MBR+GPT
+      sudo partprobe        # re-read the partition table
+      ```
+
+      Naming: `/dev/sda` is the first disk, `/dev/sda1` its first partition;
+      NVMe looks like `/dev/nvme0n1p1`.
+
+      ### Creating a filesystem
+
+      ```bash
+      sudo mkfs.ext4 /dev/sdb1     # ext4 (common default)
+      sudo mkfs.xfs  /dev/sdb1     # xfs (great for large files/scaling)
+      sudo mkswap    /dev/sdb2     # make a swap area
+      blkid /dev/sdb1              # show UUID + type
+      ```
+
+      Common Linux filesystems: **ext4** (reliable general-purpose), **xfs**
+      (high-performance, default on RHEL), **btrfs/zfs** (snapshots, pooling),
+      plus **vfat/exfat** for cross-OS USB sticks.
+    deep_dive: |
+      ### What partitioning and `mkfs` write to the disk
+
+      **A partition table is just metadata at fixed offsets.** MBR packs a 64-byte
+      table into the first 512-byte sector (LBA 0) — four 16-byte entries, hence
+      the 4-primary limit, plus a 2 TB ceiling because it addresses sectors with a
+      32-bit count. **GPT** writes a header at LBA 1 with an array of 128+ entries,
+      every field CRC-protected, and keeps a *backup copy at the end of the disk*;
+      it also leaves a "protective MBR" at LBA 0 so old tools don't see the disk as
+      empty. That redundancy is why GPT survives a corrupted primary header.
+
+      **`mkfs` lays down the on-disk data structures.** Making an ext4 filesystem
+      writes a **superblock** (size, block count, feature flags), **inode tables**,
+      and **block/inode bitmaps** that track what's free — the skeleton the kernel
+      later fills. `blkid` reads the UUID and type straight from that superblock.
+      Nothing here touches your files yet; it just builds the bookkeeping.
+
+      **What those structures look like (a "very simple file system").** OSTEP's
+      teaching model *vsfs* captures every real ext-family layout: the disk is
+      divided into a **superblock** (global counts and feature flags), an **inode
+      bitmap** and a **data bitmap** (one bit per inode/data block — free or used),
+      an **inode table**, and the **data region**. An *inode* holds one file's
+      metadata plus pointers to its data blocks; to grow past a few blocks it uses a
+      **multi-level index** — some direct pointers, then an *indirect* pointer to a
+      whole block of further pointers (and double-indirect beyond that). This is why
+      one `open()`+`read()` can cost several disk I/Os: read the inode, follow its
+      pointers, then read the data — often scattered across the platter. Cutting
+      that I/O cost is the entire motivation behind caching, on-disk locality (the
+      Fast File System's block groups), and read-ahead.
+
+      **Why `partprobe` exists.** The kernel reads the partition table once and
+      caches it in memory. Edit the table on a disk that's already in use and the
+      kernel's view is stale until you force a re-read — `partprobe` issues the
+      `BLKRRPART` ioctl to do exactly that, which is also why it can't re-read a
+      disk with a partition currently mounted.
+    cards:
+      - front: "MBR vs GPT — give the two headline differences."
+        back: "MBR: max 2 TB, 4 primary partitions, BIOS. GPT: huge capacity, 128+ partitions, UEFI. Prefer GPT."
+      - front: "Which command creates an ext4 filesystem on /dev/sdb1?"
+        back: "`mkfs.ext4 /dev/sdb1` (run with sudo)."
+      - front: "What does `blkid` show you?"
+        back: "Each block device's UUID and filesystem type — handy for /etc/fstab entries."
+      - cloze: "On a modern UEFI system you'd choose a {{c1::GPT}} partition table; the classic BIOS-era table is {{c2::MBR}}."
+      - cloze: "`mkfs.ext4` makes a filesystem, while `{{c1::mkswap}}` prepares a swap partition."
+    feynman:
+      - "Explain the three steps from a brand-new disk to a directory you can write files into."
+      - "When would you pick xfs over ext4?"
+    labs:
+      - title: "Provision a new data disk"
+        slug: lab-provision-disk
+        difficulty: challenge
+        est_minutes: 30
+        scenario: |
+          A new virtual disk `/dev/sdb` was attached to a server. You must turn it
+          into usable, persistent storage mounted at `/data`. (Practice in a VM —
+          this destroys data on the target disk!)
+        deliverable: |
+          1. Inspect the disk.
+          2. Create a single GPT partition spanning it.
+          3. Put an ext4 filesystem on the partition.
+          4. Find its UUID.
+          (Mounting/persistence is the next lesson — note how you'd continue.)
+        hints: |
+          - `lsblk`, `parted`/`gdisk`, `mkfs.ext4`, `blkid`
+        solution: |
+          ```bash
+          lsblk
+          sudo parted /dev/sdb --script mklabel gpt mkpart primary ext4 0% 100%
+          sudo mkfs.ext4 /dev/sdb1
+          sudo blkid /dev/sdb1        # note the UUID for fstab
+          # next: mkdir /data; mount by UUID; add to /etc/fstab (see next lesson)
+          ```
+
+  - title: "Mounting, fstab, and filesystem health"
+    slug: mounting-and-fsck
+    order: 2
+    est_minutes: 24
+    summary: "Attach filesystems, make mounts persistent, manage swap, and check integrity."
+    body: |
+      ## Mounting attaches a filesystem to the tree
+
+      A filesystem isn't usable until it's **mounted** onto a directory
+      (mount point).
+
+      ```bash
+      sudo mkdir -p /data
+      sudo mount /dev/sdb1 /data       # mount now
+      mount | grep /data               # verify
+      df -h /data                      # space + where it's mounted
+      sudo umount /data                # detach
+      ```
+
+      ### Persistent mounts: /etc/fstab
+
+      Manual mounts vanish on reboot. Add a line to **`/etc/fstab`** so it
+      mounts automatically. Use the **UUID** (stable across reordering):
+
+      ```
+      # <device>          <mount>  <fstype> <options>      <dump> <pass>
+      UUID=abcd-1234       /data    ext4     defaults        0      2
+      ```
+
+      ```bash
+      sudo mount -a        # mount everything in fstab (tests your entry!)
+      ```
+
+      ⚠️ A bad fstab line can block boot — always `mount -a` to test before
+      rebooting.
+
+      ## Swap
+
+      ```bash
+      sudo swapon /dev/sdb2      # enable swap
+      swapon --show ; free -h    # verify
+      ```
+      Add a swap line to fstab (`UUID=... none swap sw 0 0`) to persist it.
+
+      ## Disk usage and integrity
+
+      ```bash
+      df -h                # free space per mounted filesystem
+      du -sh /var/*        # space used by each item
+      sudo fsck /dev/sdb1  # check/repair — ONLY on an UNMOUNTED fs
+      ```
+    deep_dive: |
+      ### Mounting, stable names, and why journaling made fsck fast
+
+      **Mounting grafts one tree onto another.** The `mount()` syscall tells the
+      kernel's **VFS** layer: "from now on, lookups that reach this directory
+      should resolve into *that* filesystem's root instead." The mount point's
+      original contents aren't erased — they're *shadowed* underneath and reappear
+      when you `umount`. This is why everything from a hard disk to `/proc` to a
+      tmpfs plugs into one unified namespace.
+
+      **UUIDs beat device names because `/dev/sdb` isn't stable.** The kernel names
+      disks in the order it *probes* them, which can change between boots or when
+      you add a controller — so yesterday's `/dev/sdb` may be today's `/dev/sdc`.
+      The filesystem UUID lives in the superblock and never moves, so an
+      `fstab` keyed on UUID always mounts the right volume. The last `fstab` field
+      is the **fsck pass order**: root is `1`, others `2`, and `0` skips the check.
+
+      **The crash-consistency problem.** A single logical change — say appending a
+      block to a file — touches several on-disk structures: the inode, the data
+      bitmap, and the data block. A crash *between* those writes leaves the
+      filesystem inconsistent (e.g. a bitmap marking a block used that no inode
+      points to). The old fix, `fsck`, scanned the *entire* disk to find and patch
+      such contradictions — correct, but O(disk size), so minutes on a big volume.
+
+      **Journaling = write-ahead logging, making recovery O(journal).** ext3/ext4
+      and xfs first write the intended update to a **journal** as a transaction: a
+      begin marker (`TxB`), the new blocks, then an end marker (`TxE`); only once
+      that transaction is safely committed do they **checkpoint** — write the blocks
+      to their real homes. A crash mid-checkpoint is now harmless: on the next mount
+      the filesystem *replays* committed transactions and discards incomplete ones,
+      touching only the small journal instead of the whole disk. (A subtlety OSTEP
+      stresses: `TxE` must land *after* its contents, so the system issues a **write
+      barrier** to stop the disk reordering it earlier.)
+
+      **Data vs metadata journaling.** Logging every data block twice is safe but
+      halves write bandwidth, so most systems (ext3's default `ordered` mode, plus
+      xfs and NTFS) journal only **metadata** and write file *data* in place first —
+      fast, and still consistent for the structures that matter. This is also why
+      you must never `fsck` a *mounted* filesystem: the kernel holds dirty metadata
+      in memory, so repairing the on-disk copy underneath it guarantees corruption.
+    cards:
+      - front: "Why use UUID instead of /dev/sdb1 in /etc/fstab?"
+        back: "Device names (sdb1) can change if disks are added/reordered; the UUID is stable, so the right filesystem always mounts at the right place."
+      - front: "What does `sudo mount -a` do and why run it after editing fstab?"
+        back: "Mounts everything listed in /etc/fstab — it tests your new entry so a typo doesn't break the next boot."
+      - front: "What's the rule about running fsck on a filesystem?"
+        back: "Only run fsck on an **unmounted** filesystem (or read-only) — checking a mounted, changing filesystem can corrupt it."
+      - front: "Difference between `df` and `du`?"
+        back: "`df` shows free/used space per mounted filesystem; `du` shows space consumed by specific files/directories."
+      - cloze: "Persistent mounts are configured in `/etc/{{c1::fstab}}`, and you test new entries with `mount {{c2::-a}}`."
+    feynman:
+      - "Explain what 'mounting' actually means using the directory-tree picture."
+      - "Why can a single typo in /etc/fstab stop a server from booting?"
+    labs:
+      - title: "Make the data disk persistent"
+        slug: lab-persistent-mount
+        difficulty: challenge
+        est_minutes: 25
+        scenario: |
+          Continuing from the provisioned `/dev/sdb1`: it must mount at `/data`
+          automatically on every boot, by UUID, and survive a reboot test.
+        deliverable: |
+          1. Create the mount point and mount it now.
+          2. Add a UUID-based entry to /etc/fstab.
+          3. Prove the fstab entry is valid without rebooting.
+          4. Show how you'd verify free space on it.
+        hints: |
+          - `blkid` for the UUID, then edit `/etc/fstab`.
+          - `mount -a` validates; `df -h /data` confirms.
+        solution: |
+          ```bash
+          sudo mkdir -p /data
+          UUID=$(sudo blkid -s UUID -o value /dev/sdb1)
+          echo "UUID=$UUID  /data  ext4  defaults  0  2" | sudo tee -a /etc/fstab
+          sudo umount /data 2>/dev/null; sudo mount -a   # test fstab
+          df -h /data
+          ```
+
+  - title: "Logical Volume Manager (LVM)"
+    slug: lvm
+    order: 3
+    est_minutes: 24
+    summary: "Flexible storage you can grow and snapshot — the layer above raw partitions."
+    body: |
+      ## Why LVM
+
+      Raw partitions are rigid — resizing is painful. **LVM** adds a flexible
+      layer so you can grow, shrink, span disks, and snapshot.
+
+      ### The three layers
+
+      ```
+      Physical Volumes (PV)   = raw disks/partitions  (pvcreate)
+            ↓ grouped into
+      Volume Group (VG)       = a pool of space        (vgcreate)
+            ↓ carved into
+      Logical Volumes (LV)    = the "partitions" you format/mount (lvcreate)
+      ```
+
+      ### Build it
+
+      ```bash
+      sudo pvcreate /dev/sdb /dev/sdc        # mark disks as PVs
+      sudo vgcreate data_vg /dev/sdb /dev/sdc # pool them
+      sudo lvcreate -L 20G -n web_lv data_vg  # carve a 20G volume
+      sudo mkfs.ext4 /dev/data_vg/web_lv      # format it
+      ```
+
+      ### The superpower: grow online
+
+      ```bash
+      sudo lvextend -L +10G /dev/data_vg/web_lv     # add 10G
+      sudo resize2fs /dev/data_vg/web_lv            # grow the ext4 fs (live!)
+      ```
+
+      Inspect with `pvs`, `vgs`, `lvs` (or the `*display` variants).
+    deep_dive: |
+      ### Why LVM can grow a "full" disk without downtime
+
+      A normal filesystem is laid down directly on a partition whose start/end
+      sectors are fixed — to enlarge it you'd have to move the partition after it,
+      which usually means unmounting and risk. LVM breaks that rigidity by
+      inserting a **mapping layer** (device-mapper in the kernel).
+
+      - A **PV** is divided into fixed-size **physical extents (PE)**, typically
+        4 MiB each.
+      - A **VG** is just a pool of those extents from one or more PVs.
+      - An **LV** is a list of extents mapped to a contiguous-looking virtual
+        device. Those extents can live *anywhere*, even across multiple disks.
+
+      So "extend the LV" simply means "map more free extents from the pool to this
+      LV" — a metadata change, instant and non-destructive. The filesystem on top
+      still thinks its block device just got bigger, so `resize2fs`/`xfs_growfs`
+      extends it into the new space while mounted. That indirection is also what
+      makes **snapshots** possible: a snapshot LV records only the extents that
+      *change* after the snapshot point (copy-on-write), so you can back up a
+      consistent point-in-time view cheaply.
+
+      The cost of the indirection is a tiny bit of metadata and a layer to reason
+      about — which is why production storage almost always uses it: flexibility
+      beats the rigidity of raw partitions.
+    cards:
+      - front: "Name LVM's three layers from bottom to top."
+        back: "Physical Volume (PV) → Volume Group (VG) → Logical Volume (LV)."
+      - front: "How do you grow an LVM logical volume and its ext4 filesystem online?"
+        back: "`lvextend -L +<size> <lv>` then `resize2fs <lv>` (xfs uses `xfs_growfs`) — no unmount needed."
+      - front: "What's the main reason to use LVM over plain partitions?"
+        back: "Flexibility: resize/grow/shrink, span multiple disks into one pool, and take snapshots — without repartitioning."
+      - cloze: "In LVM you `{{c1::pvcreate}}` a disk, `{{c2::vgcreate}}` a pool, then `{{c3::lvcreate}}` a volume to format and mount."
+    feynman:
+      - "Explain the PV→VG→LV hierarchy with a 'pool of water' analogy."
+      - "Why can LVM extend a volume without unmounting it?"
+    labs:
+      - title: "Build and grow an LVM volume"
+        slug: lab-lvm
+        difficulty: challenge
+        est_minutes: 30
+        scenario: |
+          App logs are outgrowing their disk. Build flexible storage from two
+          disks and prove you can grow it later without downtime (VM practice).
+        deliverable: |
+          1. Turn /dev/sdb and /dev/sdc into PVs and pool them into a VG.
+          2. Create a 5G logical volume, format ext4, mount at /srv/app.
+          3. Grow the volume by 3G and extend the filesystem live.
+          4. Show the before/after size with `lvs` and `df -h`.
+        hints: |
+          - pvcreate → vgcreate → lvcreate → mkfs → mount
+          - lvextend then resize2fs
+        solution: |
+          ```bash
+          sudo pvcreate /dev/sdb /dev/sdc
+          sudo vgcreate app_vg /dev/sdb /dev/sdc
+          sudo lvcreate -L 5G -n app_lv app_vg
+          sudo mkfs.ext4 /dev/app_vg/app_lv
+          sudo mkdir -p /srv/app && sudo mount /dev/app_vg/app_lv /srv/app
+          df -h /srv/app
+          sudo lvextend -L +3G /dev/app_vg/app_lv
+          sudo resize2fs /dev/app_vg/app_lv
+          lvs ; df -h /srv/app
+          ```
+
+  - title: "RAID and udev"
+    slug: raid-and-udev
+    order: 4
+    est_minutes: 18
+    summary: "Combine disks for redundancy/performance, and understand persistent device naming."
+    body: |
+      ## RAID — redundancy and/or speed
+
+      RAID combines disks. The levels you must know:
+
+      | Level | What | Min disks | Trade-off |
+      |-------|------|-----------|-----------|
+      | RAID 0 | striping | 2 | speed, **no** redundancy (any disk dies → all lost) |
+      | RAID 1 | mirroring | 2 | full redundancy, 50% capacity |
+      | RAID 5 | striping + parity | 3 | survives 1 disk, good capacity |
+      | RAID 6 | double parity | 4 | survives 2 disks |
+      | RAID 10 | mirror + stripe | 4 | speed + redundancy, 50% capacity |
+
+      Software RAID on Linux uses **mdadm**:
+
+      ```bash
+      sudo mdadm --create /dev/md0 --level=1 --raid-devices=2 /dev/sdb /dev/sdc
+      cat /proc/mdstat          # status / rebuild progress
+      sudo mdadm --detail /dev/md0
+      ```
+
+      RAID is **not a backup** — it protects against *disk failure*, not against
+      deletion, corruption, or ransomware.
+
+      ## udev — device naming and events
+
+      **udev** manages `/dev` dynamically: when a device appears, the kernel emits
+      a uevent and udev applies **rules** (in `/etc/udev/rules.d/`) to name it and
+      set permissions — e.g. give a specific USB device a stable symlink.
+
+      ```bash
+      udevadm info /dev/sdb        # attributes you can match in rules
+      udevadm monitor              # watch events live (plug something in)
+      ```
+    deep_dive: |
+      ### How md RAID and udev work beneath the commands
+
+      **md RAID is a virtual block device.** `mdadm --create` assembles several
+      real disks into one kernel device (`/dev/md0`) that the rest of the system
+      treats like an ordinary disk — you put a filesystem on *it*. Each member
+      stores an md **superblock** recording the array's UUID, level, and role, so
+      the array can be reassembled even if the disks come back in a different
+      order. RAID 5/6 redundancy is plain **XOR parity** computed on every write;
+      losing a disk means the kernel reconstructs its blocks on the fly from the
+      survivors, and a rebuild reads them all to repopulate a replacement —
+      slowly, which is why large arrays are vulnerable during a rebuild.
+
+      **The three lenses OSTEP uses to compare RAID — capacity, reliability,
+      performance.** With N disks: **RAID-0** (striping) gives full N-disk capacity
+      and the best throughput but tolerates **zero** failures. **RAID-1**
+      (mirroring) survives a failure, but every write becomes two physical writes
+      and usable capacity is halved. **RAID-4/5** add one parity block per stripe:
+      usable capacity is N−1 disks and the array survives one failure, rebuilding a
+      lost block by XOR-ing the survivors (XOR keeps the number of 1s in a stripe
+      even, so any one missing bit is recoverable).
+
+      **Why parity RAID is slow on small writes (the "small-write problem").**
+      Changing one block must also update its parity, and to recompute parity the
+      array first *reads* the old data and old parity, then *writes* the new data
+      and new parity — **4 I/Os for one logical write** (a read-modify-write).
+      **RAID-4** sends every parity update to one dedicated parity disk, making it
+      the bottleneck; **RAID-5** fixes that by *rotating* parity across all disks so
+      the load spreads. This is the core reason mirroring is often preferred for
+      write-heavy, latency-sensitive workloads despite costing more disks.
+
+      **udev is the userspace half of device discovery.** When hardware appears the
+      kernel emits a **uevent** over a netlink socket. `systemd-udevd` listens,
+      matches the device's attributes against rules in `/lib/udev/rules.d/` and
+      `/etc/udev/rules.d/`, then creates the `/dev` node, sets its owner and
+      permissions, and can run helpers or add symlinks. `udevadm info` shows the
+      very attributes (`ATTR{}`, `ENV{}`) you can match on.
+
+      **Stable symlinks solve the naming race.** Because `/dev/sda` vs `/dev/sdb`
+      depends on probe timing, udev populates `/dev/disk/by-uuid/` and `by-id/`
+      with persistent links derived from the hardware itself — the reliable way to
+      reference a specific disk in scripts and `fstab`.
+    cards:
+      - front: "RAID 0 vs RAID 1?"
+        back: "RAID 0 stripes for speed with NO redundancy (lose one disk, lose everything). RAID 1 mirrors for full redundancy at 50% usable capacity."
+      - front: "Which RAID level survives a single disk failure while keeping good capacity via parity?"
+        back: "RAID 5 (striping + distributed parity, min 3 disks). RAID 6 adds a second parity to survive two failures."
+      - front: "Why is RAID not a substitute for backups?"
+        back: "RAID protects against hardware (disk) failure only — it faithfully mirrors deletions, corruption, and ransomware to all disks."
+      - front: "What does udev do?"
+        back: "Dynamically manages /dev: on device events it applies rules to name devices, set permissions, and create stable symlinks."
+      - cloze: "Linux software RAID is managed with `{{c1::mdadm}}`, and you watch rebuild progress in `/proc/{{c2::mdstat}}`."
+    feynman:
+      - "Explain why RAID 0 is risky despite being fast."
+      - "Argue why 'we have RAID' is not the same as 'we have backups'."
+    labs:
+      - title: "Choose the right RAID level"
+        slug: lab-raid-choice
+        difficulty: core
+        est_minutes: 18
+        scenario: |
+          Three teams ask for storage with different priorities. You must pick a
+          RAID level for each and justify it.
+        deliverable: |
+          Pick a RAID level + one-line justification for:
+          1. A scratch space for video rendering — max speed, data is disposable.
+          2. A database that must survive a single disk failure with good capacity.
+          3. A 2-disk boot volume that must keep running if one disk dies.
+          Then: write the mdadm command to build case 3.
+        hints: |
+          - Disposable+speed → 0; survive 1 disk w/ capacity → 5; 2-disk redundancy → 1.
+        solution: |
+          1. **RAID 0** — striping for raw speed; redundancy doesn't matter for
+             disposable scratch data.
+          2. **RAID 5** — survives one disk loss with parity and good usable space
+             (needs ≥3 disks).
+          3. **RAID 1** — mirror two disks so either can fail.
+          ```bash
+          sudo mdadm --create /dev/md0 --level=1 --raid-devices=2 /dev/sdb /dev/sdc
+          ```
+
+quiz:
+  title: "Devices, Disks & Filesystems — chapter exam"
+  slug: lpic1-devices-disks-exam
+  scope: chapter
+  description: "Partitioning, filesystems, mounting, LVM, and RAID."
+  questions:
+    - type: command
+      text: "Create an ext4 filesystem on the partition /dev/sdb1."
+      explanation: "`mkfs.ext4 /dev/sdb1` writes an ext4 filesystem."
+      answers:
+        - {value: "(sudo )?mkfs\\.ext4 /dev/sdb1", match: regex}
+        - {value: "(sudo )?mkfs -t ext4 /dev/sdb1", match: regex}
+    - type: mcq
+      text: "Why reference filesystems by UUID in /etc/fstab?"
+      explanation: "UUIDs are stable; /dev names can change when disks are added/reordered."
+      choices:
+        - {text: "Device names can change; UUIDs are stable", correct: true}
+        - {text: "UUIDs mount faster"}
+        - {text: "fstab cannot use /dev names"}
+        - {text: "UUIDs use less memory"}
+    - type: mcq
+      text: "Which RAID level mirrors data across two disks for full redundancy?"
+      explanation: "RAID 1 is mirroring."
+      choices:
+        - {text: "RAID 1", correct: true}
+        - {text: "RAID 0"}
+        - {text: "RAID 5"}
+        - {text: "JBOD"}
+    - type: true_false
+      text: "You can safely run fsck on a mounted, in-use filesystem."
+      explanation: "False — run fsck on an unmounted (or read-only) filesystem to avoid corruption."
+      choices:
+        - {text: "True"}
+        - {text: "False", correct: true}
+    - type: command
+      text: "Test all /etc/fstab entries by mounting them now (one command)."
+      explanation: "`mount -a` mounts everything in fstab — your validity check before reboot."
+      answers:
+        - {value: "(sudo )?mount -a", match: regex}
+    - type: mcq
+      text: "Order the LVM layers from bottom to top."
+      explanation: "Physical Volume → Volume Group → Logical Volume."
+      choices:
+        - {text: "PV → VG → LV", correct: true}
+        - {text: "LV → VG → PV"}
+        - {text: "VG → PV → LV"}
+        - {text: "PV → LV → VG"}
+    - type: true_false
+      text: "RAID replaces the need for backups."
+      explanation: "False — RAID guards against disk failure only, not deletion/corruption."
+      choices:
+        - {text: "True"}
+        - {text: "False", correct: true}

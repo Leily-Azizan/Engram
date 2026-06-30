@@ -1,0 +1,441 @@
+chapter:
+  title: "System Architecture"
+  slug: system-architecture
+  order: 1
+  summary: "How a Linux system boots, how it detects hardware, and how to move between boot targets and shut down safely."
+
+lessons:
+  - title: "Determine and configure hardware settings"
+    slug: hardware-settings
+    order: 1
+    est_minutes: 20
+    summary: "How the kernel discovers hardware and where you inspect it from user space."
+    body: |
+      ## How Linux sees hardware
+
+      When the kernel boots it probes the hardware and exposes what it finds
+      through **virtual filesystems** and **device files**. You rarely poke
+      hardware directly — you read these interfaces.
+
+      ### The key interfaces
+
+      | Interface | What it is | Example |
+      |-----------|------------|---------|
+      | `/proc`   | Live kernel + process info (virtual) | `cat /proc/cpuinfo` |
+      | `/sys`    | Devices, drivers, kernel objects (sysfs) | `ls /sys/class/net` |
+      | `/dev`    | Device nodes you can read/write | `/dev/sda`, `/dev/null` |
+
+      ### Inspecting hardware from the shell
+
+      ```bash
+      lscpu              # CPU architecture summary
+      lsmem              # memory ranges
+      lsblk              # block devices (disks/partitions) as a tree
+      lspci              # PCI devices (GPU, NIC, controllers)
+      lsusb              # USB devices
+      free -h            # memory usage, human readable
+      ```
+
+      ### Kernel modules (drivers)
+
+      Hardware support often lives in loadable **modules**:
+
+      ```bash
+      lsmod                      # list loaded modules
+      modinfo e1000e             # info about a module
+      sudo modprobe vfat         # load a module (and its dependencies)
+      sudo modprobe -r vfat      # unload it
+      ```
+
+      Module config lives under `/etc/modprobe.d/` and `/etc/modules-load.d/`.
+
+      ### Where device events come from
+
+      **udev** (the device manager, part of systemd) listens for kernel events
+      and creates/removes nodes in `/dev` and applies naming rules. Inspect it
+      with `udevadm info /dev/sda`.
+    deep_dive: |
+      ### How the kernel actually exposes hardware
+
+      **`/proc` and `/sys` are not real files.** They have no disk blocks. Each
+      "file" is a callback: when you `read()` `/proc/cpuinfo`, the kernel runs a
+      function *at that moment* that formats the answer into your buffer. That's
+      why the size is `0` in `ls -l` and why the contents change between two
+      `cat`s — you're calling into the kernel, not reading storage.
+
+      **The kobject/sysfs model.** Internally the kernel represents every device,
+      driver, bus and class as a **`kobject`** linked into a tree. `sysfs` simply
+      projects that tree onto directories, and each device *attribute* (e.g.
+      `/sys/class/net/eth0/mtu`) is a `show`/`store` function pair. So writing to a
+      sysfs file calls the driver's `store` handler — that's how `echo 1 >
+      /sys/.../power/control` actually pokes hardware.
+
+      ```
+      kobject tree            sysfs projection
+      ───────────             ────────────────
+      bus  ─ pci      →   /sys/bus/pci/devices/0000:00:1f.2
+      class ─ net     →   /sys/class/net/eth0/{mtu,address,speed}
+      device ─ block  →   /sys/block/sda/{size,queue/...}
+      ```
+
+      **Where device events come from (the uevent path).** When the kernel
+      discovers or removes hardware it emits a **uevent** — a small message — over a
+      **netlink socket** (`NETLINK_KOBJECT_UEVENT`). `systemd-udevd` is listening
+      on that socket. It matches the event against rules in `/lib/udev/rules.d/`
+      and `/etc/udev/rules.d/`, then creates the `/dev` node, sets owner/mode, and
+      adds stable symlinks (`/dev/disk/by-uuid/...`). Nothing in `/dev` is "static"
+      — it's a tmpfs populated live by these events. `udevadm monitor` literally
+      taps that netlink stream.
+
+      **What a device node *is*.** A node like `/dev/sda` is not data — it's a
+      pointer made of two numbers: a **major** (which driver) and a **minor**
+      (which instance). `ls -l /dev/sda` shows `8, 0`: major 8 = the SCSI/SATA
+      block driver, minor 0 = first disk. `open()` on that node routes every
+      read/write through that driver's `block_device_operations`.
+
+      **Modules and the kernel symbol table.** A driver `.ko` is relocatable object
+      code. `modprobe` reads `/lib/modules/$(uname -r)/modules.dep` to order
+      dependencies, then the `finit_module()` syscall hands the file to the kernel,
+      which links the module's unresolved symbols against the in-kernel symbol
+      table (`/proc/kallsyms`) and runs its `init` function. `lsmod` is just a
+      pretty view of `/proc/modules`; the refcount column is why you can't
+      `modprobe -r` a module a device is still using.
+
+      Mental model: the kernel keeps the truth in memory as an object graph;
+      `/proc`, `/sys` and `/dev` are three different *views* of that graph, and
+      udev keeps `/dev` in sync by reacting to events on a socket.
+    cards:
+      - front: "Which virtual filesystem exposes live CPU info such as `/proc/cpuinfo`?"
+        back: "`/proc` — a virtual filesystem the kernel populates with process and system info at runtime."
+      - front: "What does `lsblk` show?"
+        back: "Block devices (disks and partitions) arranged as a tree, with mount points and sizes."
+      - front: "How do you load a kernel module *and* its dependencies?"
+        back: "`modprobe <module>` (unlike `insmod`, it resolves dependencies)."
+      - cloze: "The command `{{c1::lspci}}` lists PCI devices, while `{{c2::lsusb}}` lists USB devices."
+      - cloze: "Device nodes live in the `{{c1::/dev}}` directory, and the device manager that creates them is called `{{c2::udev}}`."
+    feynman:
+      - "Explain the difference between `/proc`, `/sys`, and `/dev` to someone new to Linux."
+      - "Why does `modprobe` exist when `insmod` already loads a module?"
+    labs:
+      - title: "Profile your machine"
+        slug: lab-profile-machine
+        difficulty: intro
+        est_minutes: 15
+        scenario: |
+          You've just been handed a Linux box with no documentation. Before you
+          can plan anything, you need to know what it actually is.
+        deliverable: |
+          Produce a short "spec sheet" of the machine containing:
+
+          1. CPU model and core count
+          2. Total RAM
+          3. Every block device and its size
+          4. The network interface names
+          5. One currently loaded kernel module and what it's for
+
+          Write the exact command you used for each item.
+        hints: |
+          - Cores: `lscpu` or `nproc`
+          - RAM: `free -h`
+          - Disks: `lsblk`
+          - NICs: `ls /sys/class/net` or `ip link`
+        solution: |
+          ```bash
+          lscpu | grep -E 'Model name|^CPU\(s\)'
+          free -h | grep Mem
+          lsblk -d -o NAME,SIZE,MODEL
+          ls /sys/class/net
+          lsmod | head           # pick one, then: modinfo <name>
+          ```
+
+  - title: "Boot the system"
+    slug: boot-the-system
+    order: 2
+    est_minutes: 20
+    summary: "The boot chain from firmware to login prompt, and how to read what happened."
+    body: |
+      ## The boot chain
+
+      A Linux system comes up in stages. Knowing the order is what lets you
+      diagnose *where* a boot failed.
+
+      ```
+      Firmware (BIOS/UEFI)
+          → Bootloader (GRUB2)
+              → Kernel + initramfs
+                  → init system (systemd, PID 1)
+                      → targets / services
+                          → login prompt
+      ```
+
+      1. **Firmware** (BIOS or UEFI) runs POST and hands off to a bootloader.
+      2. **GRUB2** loads the selected kernel and an **initramfs** (a tiny
+         temporary root filesystem with the drivers needed to mount the real root).
+      3. The **kernel** initialises, mounts the real root filesystem, and starts
+         **PID 1** — on modern distros, `systemd`.
+      4. `systemd` brings the system to its default **target**.
+
+      ### Reading boot logs
+
+      ```bash
+      dmesg                 # kernel ring buffer (hardware/driver messages)
+      dmesg -T              # with human-readable timestamps
+      journalctl -b         # everything from the current boot
+      journalctl -b -1      # the previous boot
+      journalctl -p err -b  # only errors from this boot
+      ```
+
+      `dmesg` is specifically the **kernel's** messages; `journalctl` is the
+      systemd journal covering the kernel *and* all services.
+    deep_dive: |
+      ### What actually happens at each handoff
+
+      ```
+      power on
+        │  CPU starts in 16-bit real mode at a fixed reset vector
+        ▼
+      Firmware (UEFI)  ── reads ESP (FAT32) ──► grubx64.efi
+        │  NVRAM BootOrder/BootXXXX entries point at the loader
+        ▼
+      GRUB  ── loads vmlinuz + initramfs into RAM, sets cmdline ──►
+        ▼
+      Kernel  ── self-decompress, MM/sched/IRQ up, mount initramfs ──►
+        ▼
+      initramfs  ── find+mount real root, switch_root ──►
+        ▼
+      /sbin/init = systemd (PID 1)  ── activate units to default.target
+      ```
+
+      **Firmware → bootloader.** UEFI firmware contains a FAT driver. It reads the
+      **EFI System Partition**, looks up the boot entry stored in **NVRAM**
+      (`efibootmgr` shows these), and executes a PE/COFF binary — `grubx64.efi`.
+      The CPU actually starts in 16-bit **real mode** at the reset vector; firmware
+      walks it up to protected/long mode before handing off. (Legacy BIOS instead
+      loaded 512 bytes of MBR boot code and left the rest to the bootloader — which
+      is why GRUB needs a "stage 1.5" in the post-MBR gap on BIOS systems.)
+
+      **Bootloader → kernel.** GRUB loads two blobs into RAM: the compressed
+      **kernel image** (`vmlinuz`, a self-extracting bzImage) and the
+      **initramfs**. It sets the kernel **`cmdline`** (e.g. `root=UUID=… ro
+      quiet`), populates the boot-params struct, and jumps to the kernel's entry
+      point. Everything after this point is the kernel — firmware is done.
+
+      **Kernel init.** The image decompresses itself in place, then `start_kernel()`
+      brings up the core subsystems in order: memory management (the page
+      allocator), the scheduler, interrupt/timer handling, then it detects CPUs and
+      brings secondary cores online. Finally it **unpacks the initramfs cpio archive
+      into a rootfs (tmpfs) in RAM** and execs the `/init` inside it.
+
+      **Why the initramfs detour at all?** The kernel needs to mount the real root,
+      but the real root might live on **LVM, RAID, NVMe, iSCSI, or a LUKS-encrypted
+      volume** whose driver/tooling isn't compiled in. Chicken-and-egg: you can't
+      read the disk to get the driver that reads the disk. The initramfs breaks the
+      cycle — it's a tiny userland carrying exactly the modules + `udev` +
+      `cryptsetup`/`lvm` needed to *assemble and unlock* the real root.
+
+      **Pivot to the real root.** Once `/init` has mounted the real filesystem, it
+      calls **`switch_root`**: it moves the mounts over, deletes the RAM rootfs to
+      free memory, and `exec`s the real `/sbin/init` **without forking** — so the
+      new init *inherits PID 1*. (`pivot_root` is the older two-directory variant;
+      `switch_root` is what initramfs uses because it can discard the initramfs
+      entirely.)
+
+      **Why PID 1 is special.** The kernel gives PID 1 two unique properties: (1)
+      signals have **no default action** for it — a stray `SIGTERM` won't kill it,
+      only handlers it installs run; and (2) it is the **reaper** — when any process
+      is orphaned, the kernel re-parents it to PID 1, which must `wait()` on it or
+      leave a zombie. That's *why* an init system, not just a script, sits here.
+
+      **systemd takes over.** PID 1 reads units and builds a **dependency graph**,
+      then activates units in parallel up to `default.target`. Two tricks make it
+      fast: **socket activation** (systemd opens a service's listening socket first
+      and starts the daemon only when a client connects) and parallelism. Because
+      it's a graph with timestamps — not a fixed script — `systemd-analyze` and
+      `systemd-analyze critical-chain` can attribute boot time precisely.
+
+      Mental model: each stage builds *just enough* environment for the next, then
+      hands over and disappears — firmware can't read LVM, the bare kernel can't
+      assume drivers, so the initramfs is the bridge that lets the system pull
+      itself up to its real root.
+    cards:
+      - front: "What is the job of the initramfs during boot?"
+        back: "It's a temporary in-memory root filesystem containing the drivers/tools needed to mount the *real* root filesystem."
+      - front: "Which process is PID 1 on a systemd system?"
+        back: "`systemd` — the init system, the first userspace process, ancestor of all others."
+      - front: "How do you view kernel messages from the *previous* boot?"
+        back: "`journalctl -b -1` (the systemd journal; `-b -1` selects the prior boot)."
+      - cloze: "The bootloader on most modern Linux systems is `{{c1::GRUB2}}`, which loads the kernel and the `{{c2::initramfs}}`."
+    feynman:
+      - "Walk through the boot chain from power-on to login prompt, naming each stage."
+      - "When would you reach for `dmesg` instead of `journalctl`?"
+    labs:
+      - title: "Trace your last boot"
+        slug: lab-trace-boot
+        difficulty: core
+        est_minutes: 20
+        scenario: |
+          Your team lead suspects the last boot was slower than usual and wants
+          evidence, not vibes.
+        deliverable: |
+          1. Show how long the last boot took and which units were slowest.
+          2. Find any errors logged during the current boot.
+          3. Confirm what the default boot target is.
+        hints: |
+          - `systemd-analyze` and `systemd-analyze blame`
+          - `journalctl -p err -b`
+          - `systemctl get-default`
+        solution: |
+          ```bash
+          systemd-analyze              # total boot time
+          systemd-analyze blame | head # slowest units
+          journalctl -p err -b
+          systemctl get-default        # e.g. graphical.target
+          ```
+
+  - title: "Change runlevels / boot targets and shut down"
+    slug: targets-and-shutdown
+    order: 3
+    est_minutes: 18
+    summary: "systemd targets (the successor to SysV runlevels) and safe shutdown/reboot."
+    body: |
+      ## Targets replaced runlevels
+
+      Old SysV init had numeric **runlevels**. systemd uses named **targets**,
+      which map roughly like this:
+
+      | SysV runlevel | systemd target      | Meaning              |
+      |---------------|---------------------|----------------------|
+      | 0             | `poweroff.target`   | Halt                 |
+      | 1 / S         | `rescue.target`     | Single-user/rescue   |
+      | 3             | `multi-user.target` | Multi-user, no GUI   |
+      | 5             | `graphical.target`  | Multi-user + GUI     |
+      | 6             | `reboot.target`     | Reboot               |
+
+      ### Working with targets
+
+      ```bash
+      systemctl get-default                       # current default target
+      sudo systemctl set-default multi-user.target # boot to CLI next time
+      sudo systemctl isolate multi-user.target     # switch now (like changing runlevel)
+      ```
+
+      ### Shutting down and rebooting safely
+
+      ```bash
+      sudo systemctl poweroff      # power off now
+      sudo systemctl reboot        # reboot now
+      sudo shutdown -h +5 "msg"    # halt in 5 minutes, warn logged-in users
+      sudo shutdown -c             # cancel a scheduled shutdown
+      ```
+
+      Prefer these over yanking power — they let services stop cleanly, flush
+      disk buffers, and unmount filesystems to avoid corruption.
+    deep_dive: |
+      ### What a "target" really is, and what shutdown actually does
+
+      **Targets are synchronization points, not programs.** A systemd target is a
+      special unit that runs *nothing* itself — it only groups other units via
+      `Wants=`/`Requires=` dependencies and `After=` ordering. "Reaching
+      `graphical.target`" just means systemd has started everything that target
+      pulls in. It replaced the rigid numeric runlevels with a dependency graph,
+      so units start in parallel as soon as their prerequisites are met rather
+      than marching through levels 1→5 in sequence.
+
+      **`isolate` prunes the graph.** `systemctl isolate multi-user.target` starts
+      that target's dependencies and *stops* every running unit not wanted by it —
+      which is how switching from graphical to multi-user kills the display
+      manager. `set-default` just repoints the `default.target` symlink for next
+      boot.
+
+      **Why clean shutdown matters.** `poweroff`/`reboot` tell systemd to stop
+      units in reverse dependency order, sending each service **SIGTERM**, then
+      **SIGKILL** after `TimeoutStopSec`. It then unmounts filesystems and calls
+      `sync` to flush the kernel's write-back page cache to disk, and finally
+      issues the `reboot(2)` syscall. Pull the power instead and that dirty cache
+      and any open filesystem journal never settle — exactly the inconsistency the
+      next boot's `fsck` has to repair.
+    cards:
+      - front: "Which systemd target is the equivalent of the old runlevel 3?"
+        back: "`multi-user.target` — multi-user, networked, no graphical interface."
+      - front: "How do you change the default boot target to text mode?"
+        back: "`sudo systemctl set-default multi-user.target`"
+      - front: "What's the difference between `isolate` and `set-default`?"
+        back: "`isolate` switches to a target *now*; `set-default` changes which target is used on the *next* boot."
+      - cloze: "To switch to a target immediately you run `systemctl {{c1::isolate}} <target>`, and to cancel a scheduled shutdown you run `shutdown {{c1::-c}}`."
+    feynman:
+      - "Explain why a graceful `shutdown` is safer than cutting power."
+      - "Map the classic runlevels 0,1,3,5,6 to their systemd targets and say what each does."
+    labs:
+      - title: "Safe maintenance window"
+        slug: lab-maintenance-window
+        difficulty: core
+        est_minutes: 15
+        scenario: |
+          You need to take a server down for maintenance at a controlled time
+          and make sure anyone logged in is warned — but plans change and you
+          may need to call it off.
+        deliverable: |
+          1. Schedule a reboot 10 minutes from now with a broadcast message.
+          2. Show how you'd verify it's scheduled.
+          3. Cancel it.
+          4. Then set the machine to boot into CLI-only mode next time, and show
+             how to switch to that mode immediately without rebooting.
+        hints: |
+          - `shutdown -r +10 "..."`
+          - `shutdown -c`
+          - `systemctl set-default` / `systemctl isolate`
+        solution: |
+          ```bash
+          sudo shutdown -r +10 "Maintenance reboot in 10 minutes"
+          # verify: a /run/systemd/shutdown/scheduled file exists, or check `who`
+          sudo shutdown -c
+          sudo systemctl set-default multi-user.target
+          sudo systemctl isolate multi-user.target
+          ```
+
+quiz:
+  title: "System Architecture — chapter exam"
+  slug: lpic1-system-architecture-exam
+  scope: chapter
+  description: "Boot chain, hardware discovery, and systemd targets."
+  questions:
+    - type: mcq
+      text: "Which virtual filesystem would you read to see live CPU information?"
+      explanation: "`/proc` exposes runtime kernel and process data, e.g. `/proc/cpuinfo`."
+      choices:
+        - {text: "/proc", correct: true}
+        - {text: "/etc"}
+        - {text: "/var"}
+        - {text: "/boot"}
+    - type: mcq
+      text: "What does the initramfs provide during boot?"
+      explanation: "It carries the drivers/tools needed to mount the real root filesystem."
+      choices:
+        - {text: "A temporary root with drivers to mount the real root", correct: true}
+        - {text: "The permanent root filesystem"}
+        - {text: "The bootloader menu"}
+        - {text: "The user's home directory"}
+    - type: true_false
+      text: "On a systemd system, PID 1 is the kernel."
+      explanation: "False — PID 1 is `systemd` (the first *userspace* process). The kernel isn't a normal PID."
+      choices:
+        - {text: "True"}
+        - {text: "False", correct: true}
+    - type: command
+      text: "Show kernel messages from the current boot using the systemd journal."
+      explanation: "`journalctl -b` selects the current boot."
+      answers:
+        - "journalctl -b"
+    - type: command
+      text: "Set the default boot target to multi-user (text) mode."
+      explanation: "`systemctl set-default multi-user.target` changes the target used on next boot."
+      answers:
+        - {value: "(sudo )?systemctl set-default multi-user.target", match: regex}
+    - type: mcq
+      text: "Which command switches to a target immediately, like changing runlevel on the fly?"
+      explanation: "`systemctl isolate <target>` activates it now."
+      choices:
+        - {text: "systemctl isolate", correct: true}
+        - {text: "systemctl set-default"}
+        - {text: "systemctl enable"}
+        - {text: "systemctl mask"}

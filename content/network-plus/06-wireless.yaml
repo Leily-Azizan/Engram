@@ -1,0 +1,159 @@
+chapter:
+  title: "Wireless Networking"
+  slug: wireless
+  order: 6
+  summary: "Wi-Fi standards, frequency bands, channels, and wireless security."
+
+lessons:
+  - title: "Wi-Fi standards, bands, and security"
+    slug: wifi-standards-security
+    order: 1
+    est_minutes: 20
+    summary: "802.11 generations, 2.4 vs 5 GHz, channel planning, and WPA2/WPA3."
+    body: |
+      ## 802.11 generations
+
+      | Standard | Wi-Fi name | Band(s) | Rough max |
+      |----------|-----------|---------|-----------|
+      | 802.11n  | Wi-Fi 4 | 2.4 & 5 GHz | ~600 Mbps |
+      | 802.11ac | Wi-Fi 5 | 5 GHz | ~3.5 Gbps |
+      | 802.11ax | Wi-Fi 6 | 2.4 & 5 (6E adds 6 GHz) | ~9.6 Gbps |
+
+      ## Bands: 2.4 GHz vs 5 GHz
+
+      - **2.4 GHz** — longer range, better wall penetration, but slower and
+        crowded (microwaves, Bluetooth). Only **3 non-overlapping channels**
+        (1, 6, 11).
+      - **5 GHz** — faster, far more channels, less interference, but shorter
+        range. Prefer it where coverage allows.
+
+      Overlapping channels cause interference, so neighbouring APs should use
+      non-overlapping channels (the classic 1/6/11 plan on 2.4 GHz).
+
+      ## Wireless security
+
+      | Scheme | Verdict |
+      |--------|---------|
+      | WEP | Broken — never use |
+      | WPA | Weak — avoid |
+      | WPA2 (AES/CCMP) | Good baseline |
+      | WPA3 | Best — current standard |
+
+      Modes: **Personal** (PSK — a shared passphrase) vs **Enterprise**
+      (802.1X — per-user logins via a RADIUS server). SSID = the network name;
+      hiding it is not real security.
+    deep_dive: |
+      ### Why Wi-Fi is "half-duplex radio" and what WPA actually protects
+
+      Wi-Fi is fundamentally different from a switched cable: it's a **shared radio
+      medium**. Only one device can transmit on a channel at a time without
+      colliding, so Wi-Fi is **half-duplex** and uses **CSMA/CA** (carrier sense,
+      collision *avoidance*) — devices listen first and back off randomly before
+      transmitting. That's why throughput drops as you add clients (they share
+      airtime) and why interference hurts so much: a neighbour's AP on an
+      overlapping channel forces everyone to wait and retransmit.
+
+      **Channels and the 2.4 vs 5 GHz trade-off, physically.** Lower frequency
+      (2.4 GHz) carries **further** and penetrates walls better but the band is
+      narrow and crowded — only **3 non-overlapping** 20 MHz channels (1, 6, 11),
+      shared with Bluetooth and microwaves. 5 GHz attenuates faster (shorter range)
+      but offers **many** non-overlapping channels and wider ones, so far more
+      simultaneous, faster, interference-free links. Hence: 5 GHz where coverage
+      allows, 2.4 GHz for range/penetration. Putting neighbouring APs on
+      **non-overlapping** channels is just avoiding shared-airtime contention.
+
+      **What the security schemes really do.** The SSID is broadcast in the clear;
+      hiding it changes nothing meaningful. Real protection is **encryption of the
+      radio frames** plus **authentication**:
+      - **WEP** used a broken cipher (RC4 + tiny IVs) — crackable in minutes; never
+        use it.
+      - **WPA2** uses **AES-CCMP** for strong frame encryption. *Personal* mode
+        derives the key from a shared passphrase (PSK); *Enterprise* mode uses
+        **802.1X**: each user authenticates to a **RADIUS** server and gets unique
+        keys, so one user's compromise doesn't expose others (and you can revoke one
+        account).
+      - **WPA3** adds **SAE** (a.k.a. Dragonfly), a handshake resistant to the
+        offline dictionary attacks that let attackers guess WPA2 PSKs from captured
+        handshakes, plus forward secrecy.
+
+      So "use WPA2/WPA3, prefer Enterprise for orgs" is really "use unbroken
+      encryption and per-user keys" — the confidentiality + authentication pillars
+      from the security chapter, applied to a medium anyone nearby can receive.
+    cards:
+      - front: "Why prefer 5 GHz over 2.4 GHz when range allows?"
+        back: "5 GHz is faster, has many more non-overlapping channels, and far less interference; 2.4 GHz only has 3 clean channels (1/6/11) and is crowded — though it reaches further."
+      - front: "Which wireless security schemes are safe to use today?"
+        back: "WPA2 (AES/CCMP) as a baseline and WPA3 (best). WEP and WPA are broken/weak — avoid."
+      - front: "WPA2-Personal vs WPA2-Enterprise?"
+        back: "Personal uses a shared pre-shared key (PSK); Enterprise uses 802.1X with per-user authentication via a RADIUS server."
+      - cloze: "On 2.4 GHz the three non-overlapping channels are {{c1::1}}, {{c2::6}}, and {{c3::11}}."
+      - cloze: "802.11ax is marketed as Wi-Fi {{c1::6}}; the current best security scheme is WPA{{c2::3}}."
+    feynman:
+      - "Explain the trade-off between 2.4 GHz and 5 GHz for someone setting up a home network."
+      - "Why is hiding the SSID not a real security measure?"
+    labs:
+      - title: "Plan a small office Wi-Fi"
+        slug: lab-wifi-plan
+        difficulty: core
+        est_minutes: 18
+        scenario: |
+          A two-room office has two access points and complaints of slow, flaky
+          Wi-Fi. Neighbours' networks are everywhere on 2.4 GHz.
+        deliverable: |
+          1. Choose channels for the two APs on 2.4 GHz to avoid interference.
+          2. Recommend a band strategy for laptops vs IoT/phones at range.
+          3. Choose a security scheme and mode for a staff network and explain why.
+          4. State one reason hiding the SSID won't fix the speed problem.
+        hints: |
+          - Non-overlapping 2.4 channels: 1/6/11.
+          - WPA2/WPA3; Personal vs Enterprise.
+        solution: |
+          1. Put the two APs on **non-overlapping channels** (e.g. 1 and 11).
+          2. Steer laptops to **5 GHz** (speed); leave longer-range/older IoT on
+             2.4 GHz. Enable band steering if available.
+          3. **WPA3-Personal** (or WPA2 if older clients) — strong, simple PSK;
+             use **WPA2/3-Enterprise (802.1X + RADIUS)** if per-user control is
+             needed.
+          4. Hiding the SSID only stops the name being advertised — it doesn't add
+             encryption or reduce channel interference, so it won't help speed.
+
+quiz:
+  title: "Wireless — chapter exam"
+  slug: netplus-wireless-exam
+  scope: chapter
+  description: "Wi-Fi standards, bands, and security."
+  questions:
+    - type: mcq
+      text: "Which wireless security standard is the current best practice?"
+      explanation: "WPA3 is the modern standard; WPA2 is an acceptable baseline."
+      choices:
+        - {text: "WPA3", correct: true}
+        - {text: "WEP"}
+        - {text: "WPA"}
+        - {text: "Open"}
+    - type: fill_in
+      text: "On the 2.4 GHz band, the three non-overlapping channels are 1, 6, and ____."
+      explanation: "1, 6, 11."
+      answers: ["11"]
+    - type: mcq
+      text: "Which band generally offers higher speeds and less interference but shorter range?"
+      explanation: "5 GHz is faster with more channels; 2.4 GHz reaches further."
+      choices:
+        - {text: "5 GHz", correct: true}
+        - {text: "2.4 GHz"}
+        - {text: "900 MHz"}
+        - {text: "60 GHz"}
+    - type: mcq
+      text: "WPA2-Enterprise authenticates users via which backend?"
+      explanation: "802.1X with a RADIUS server provides per-user authentication."
+      choices:
+        - {text: "A RADIUS server (802.1X)", correct: true}
+        - {text: "A single shared passphrase"}
+        - {text: "MAC filtering"}
+        - {text: "A hidden SSID"}
+    - type: true_false
+      text: "WEP is considered secure for modern networks."
+      explanation: "False — WEP is thoroughly broken; never use it."
+      choices:
+        - {text: "True"}
+        - {text: "False", correct: true}

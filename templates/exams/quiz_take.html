@@ -1,0 +1,30 @@
+{% extends 'base.html' %}
+{% block title %}{{ quiz.title }} · Engram{% endblock %}
+{% block topbar %}{{ quiz.title }}{% endblock %}
+{% block content %}
+<div class="crumbs"><a href="{% url 'quiz_list' %}">Exams</a> / {{ quiz.title }}</div>
+<h1>{{ quiz.title }}</h1>
+<p class="subtitle">Answer everything, then submit. No peeking at lessons — that's the point.</p>
+
+<form method="post" action="{% url 'quiz_submit' quiz.slug %}">
+  {% csrf_token %}
+  <div class="card">
+    {% for q in questions %}
+      <div class="q">
+        <div class="qnum">Question {{ forloop.counter }} of {{ questions|length }} · {{ q.get_qtype_display }}</div>
+        <div class="prose" style="margin:6px 0 10px;">{{ q.text_html|safe }}</div>
+        {% if q.qtype == 'mcq' or q.qtype == 'true_false' %}
+          {% for ch in q.choices.all %}
+            <label class="choice"><input type="radio" name="q_{{ q.id }}" value="{{ ch.id }}"> {{ ch.text }}</label>
+          {% endfor %}
+        {% else %}
+          <input type="text" name="q_{{ q.id }}" placeholder="{% if q.qtype == 'command' %}Type the exact command…{% else %}Your answer…{% endif %}" autocomplete="off">
+        {% endif %}
+      </div>
+    {% empty %}
+      <p class="muted">This exam has no questions yet.</p>
+    {% endfor %}
+  </div>
+  <button class="btn primary" type="submit">Submit exam</button>
+</form>
+{% endblock %}

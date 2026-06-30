@@ -1,0 +1,258 @@
+chapter:
+  title: "Troubleshooting and Tools"
+  slug: troubleshooting-tools
+  order: 8
+  summary: "A repeatable methodology plus the command-line tools to diagnose any network problem."
+
+lessons:
+  - title: "A structured troubleshooting methodology"
+    slug: methodology
+    order: 1
+    est_minutes: 18
+    summary: "The CompTIA troubleshooting steps and the bottom-up layered approach."
+    body: |
+      ## Don't guess — follow a method
+
+      The CompTIA troubleshooting steps:
+
+      1. **Identify the problem** (gather info, what changed?).
+      2. **Establish a theory** of probable cause.
+      3. **Test the theory** to confirm it.
+      4. **Establish a plan of action**; consider side effects.
+      5. **Implement** the fix (or escalate).
+      6. **Verify** full functionality; add preventive measures.
+      7. **Document** findings, actions, and outcomes.
+
+      ## Bottom-up the OSI layers
+
+      A practical companion: test from Layer 1 up.
+
+      ```
+      L1 Physical  → cable plugged? link light? `ip link` shows UP?
+      L2 Data Link → correct VLAN/MAC? switch port ok?
+      L3 Network   → have an IP/gateway? `ping` the gateway
+      L4 Transport → is the port open? `nc -zv host port`
+      L7 Application → does the service answer? `curl -v`
+      ```
+
+      Each confirmed layer narrows the search. "Works by IP, not by name" is
+      always DNS (L7 service that L3 depends on).
+    deep_dive: |
+      ### Why "bottom-up the layers" is a binary search, not a ritual
+
+      The OSI-layer method works because each layer **depends on the one below**, so
+      confirming a lower layer **eliminates an entire class of causes** above it.
+      That turns "the network is broken" (huge search space) into a sequence of
+      cheap yes/no tests that halve the problem — essentially a **binary search over
+      a dependency chain**:
+
+      - **L1/L2 up?** `ip link` shows the interface `UP` with a carrier → the cable/
+        radio and NIC are fine. If down, nothing above can possibly work, so stop
+        here.
+      - **L3 address + gateway?** `ip addr` shows an IP (not `169.254.x` APIPA →
+        DHCP worked), and you can `ping` the gateway → on-link routing is fine.
+      - **L3 beyond the gateway?** `ping 1.1.1.1` (an IP) → routing/NAT to the
+        internet works.
+      - **DNS (an L7 service L3+ depends on)?** `ping example.com` fails while the IP
+        ping succeeds → **it's DNS**, full stop. This single split (IP works, name
+        doesn't) is the highest-value test in networking.
+      - **L4/L7 service?** `nc -zv host 443` / `curl -v` → the specific port/app.
+
+      Each confirmed layer is a ruled-out half. That's *why* the order matters:
+      debugging DNS while the cable is unplugged wastes time on a branch you could
+      have pruned in one command.
+
+      **The 7-step CompTIA loop adds discipline around the diagnosis:** identify
+      (scope it — one host? one floor? everyone? — which itself localises the likely
+      shared dependency), theorise, **test the theory** (don't fix on a guess),
+      plan (consider side effects), implement *or escalate*, **verify** the whole
+      function (not just your one symptom) and add prevention, then **document**.
+      Documentation isn't bureaucracy: the next person (or future you) gets the
+      binary-search result for free, and patterns across tickets reveal systemic
+      causes. The method is what separates "restart things randomly" from
+      consistently finding root cause fast.
+    cards:
+      - front: "What are the first three CompTIA troubleshooting steps?"
+        back: "1) Identify the problem, 2) Establish a theory of probable cause, 3) Test the theory."
+      - front: "Why troubleshoot the OSI layers bottom-up?"
+        back: "Each confirmed lower layer rules out a whole class of causes, narrowing the search efficiently (no point debugging DNS if the cable is unplugged)."
+      - front: "After fixing an issue, what two steps remain?"
+        back: "Verify full functionality (and add prevention), then document the findings and actions."
+      - cloze: "The classic last troubleshooting step is to {{c1::document}} the findings, actions, and outcomes."
+    feynman:
+      - "Explain why documenting the fix matters as much as the fix itself."
+    labs:
+      - title: "Apply the method to an outage"
+        slug: lab-apply-method
+        difficulty: core
+        est_minutes: 18
+        scenario: |
+          Users on one floor suddenly can't reach any internal apps. Others are
+          fine. You need a disciplined plan, not random clicking.
+        deliverable: |
+          Write out how you'd apply the 7-step method to this outage: what you'd
+          ask/observe at each step, your most likely theory given "only one
+          floor," and how you'd verify and document.
+        hints: |
+          - "One floor" points at a shared switch/VLAN/uplink for that area.
+        solution: |
+          1. **Identify:** scope = one floor only; what changed (recent work?).
+          2. **Theory:** a shared dependency for that floor — its access switch,
+             VLAN, or uplink/trunk.
+          3. **Test:** check that switch's status, uplink, and whether clients get
+             DHCP/IP there (`ip a`, ping gateway from a floor machine).
+          4. **Plan:** e.g. reseat/replace uplink or fix VLAN/trunk config; note it
+             may briefly drop the floor.
+          5. **Implement** the fix (or escalate to networking).
+          6. **Verify:** users on that floor reach apps again; test a few hosts.
+          7. **Document:** root cause (e.g. failed trunk), action, and prevention.
+
+  - title: "Essential diagnostic tools"
+    slug: diagnostic-tools
+    order: 2
+    est_minutes: 22
+    summary: "ping, traceroute, dig/nslookup, ip/ss, nc, curl, and packet capture."
+    body: |
+      ## The toolbox
+
+      ```bash
+      ping -c4 host            # reachability + round-trip latency
+      traceroute host          # path hop-by-hop (where it stops)
+      mtr host                 # live combined ping+traceroute
+      dig +short host          # DNS resolution (nslookup as alt)
+      ip a ; ip r              # local addressing + routes
+      ss -tulnp                # listening sockets + owning process
+      nc -zv host 443          # is a TCP port open?
+      curl -I https://host     # HTTP-level check (status, headers)
+      tcpdump -i eth0 port 53  # capture packets (deep inspection)
+      ```
+
+      ## Which tool for which symptom
+
+      | Symptom | Reach for |
+      |---------|-----------|
+      | "Is the host up?" | `ping` |
+      | "Where does traffic die?" | `traceroute` / `mtr` |
+      | "Name won't resolve" | `dig` / `nslookup` |
+      | "Is the service port open?" | `nc -zv`, `ss` |
+      | "HTTP returns weird status" | `curl -v` |
+      | "I need to see the actual packets" | `tcpdump` / Wireshark |
+
+      Latency vs loss: `ping` shows both (high time = latency; missing replies =
+      loss). `traceroute` localises *where* along the path it happens.
+    deep_dive: |
+      ### How the core tools actually work (so you trust their output)
+
+      **ping** sends **ICMP Echo Request** packets and times the **Echo Reply**.
+      "Reachable" = you got replies; **latency** = the round-trip time; **loss** =
+      missing replies. Caveat: some hosts/firewalls drop ICMP, so "ping fails" can
+      mean "ICMP blocked," not "host down" — confirm with a TCP probe before
+      concluding.
+
+      **traceroute** is a clever hack on **TTL**. It sends packets with TTL=1, then
+      2, then 3… Each router that decrements TTL to 0 must return an **ICMP Time
+      Exceeded** — revealing that hop's address. So the hop list is built from the
+      "TTL expired" errors at increasing distances. That's why a hop showing `* * *`
+      isn't necessarily broken — that router just declined to send the ICMP error;
+      traffic may still pass. `mtr` runs this continuously to show per-hop loss/
+      latency over time, which localises *where* a path degrades.
+
+      **nc -zv host port** opens (or attempts) a TCP connection to test if a **port**
+      is reachable/open — bypassing ICMP entirely, so it answers "is the service
+      listening and reachable?" rather than "is the host pingable?" `ss -tulnp`
+      (LPIC) answers the same question **locally** by reading the kernel socket
+      table.
+
+      **dig/nslookup** query DNS **directly**, so you see exactly what the resolver
+      returns (or that it times out) — the decisive tool when "IP works, name
+      doesn't." You can even target a specific server (`dig @1.1.1.1 example.com`)
+      to tell "my resolver is broken" from "the record itself is wrong."
+
+      **curl -v** exercises the full L7 path: DNS → TCP connect → TLS handshake →
+      HTTP request/response, printing each stage, so a failure pinpoints which layer
+      broke. **tcpdump/Wireshark** drop to raw packet capture when you must see the
+      actual bytes (e.g., is the SYN leaving? is the TLS handshake completing?).
+
+      Matching tool to question is the skill: reachability→ping, *where it dies*→
+      traceroute/mtr, *name resolution*→dig, *port open*→nc/ss, *HTTP behaviour*→
+      curl, *the truth on the wire*→tcpdump. Each tool targets a specific OSI layer,
+      which is why they slot directly into the bottom-up method.
+    cards:
+      - front: "Which tool shows the hop-by-hop path to a destination?"
+        back: "`traceroute` (or `mtr` for a live, combined ping+traceroute view)."
+      - front: "How do you check whether TCP port 443 on a host is open?"
+        back: "`nc -zv host 443` (or `ss` locally, `curl -v`, `nmap`)."
+      - front: "Which tool captures and inspects the actual packets on the wire?"
+        back: "`tcpdump` (CLI) or Wireshark (GUI)."
+      - front: "Name won't resolve but the IP pings fine — which tool confirms the DNS issue?"
+        back: "`dig` (or `nslookup`) — query DNS directly to see if/what it returns."
+      - cloze: "`{{c1::ping}}` reports reachability and latency, while `{{c2::traceroute}}` shows where along the path packets stop."
+    feynman:
+      - "Given 'the API is slow', describe which tools you'd use and in what order."
+    labs:
+      - title: "Build a diagnostic runbook"
+        slug: lab-diagnostic-runbook
+        difficulty: challenge
+        est_minutes: 20
+        scenario: |
+          Your team wants a one-page runbook: for each common symptom, the exact
+          command(s) to run first.
+        deliverable: |
+          Produce a symptom → command table covering: host unreachable, slow/
+          intermittent path, DNS failure, port closed, HTTP error, and "need to
+          see raw packets." Give a real command for each.
+        hints: |
+          - Map each row to ping / traceroute|mtr / dig / nc|ss / curl / tcpdump.
+        solution: |
+          | Symptom | First command(s) |
+          |---------|------------------|
+          | Host unreachable | `ping -c4 host` |
+          | Slow / intermittent path | `mtr host` (or `traceroute host`) |
+          | DNS failure | `dig +short host` ; `dig host @1.1.1.1` |
+          | Port closed | `nc -zv host 443` ; `ss -tulnp` |
+          | HTTP error | `curl -v https://host` |
+          | Need raw packets | `sudo tcpdump -i any port 443` |
+
+quiz:
+  title: "Troubleshooting & Tools — chapter exam"
+  slug: netplus-troubleshooting-exam
+  scope: chapter
+  description: "Methodology and diagnostic tools."
+  questions:
+    - type: mcq
+      text: "What is the FIRST step of the CompTIA troubleshooting methodology?"
+      explanation: "Identify the problem (gather information, find what changed)."
+      choices:
+        - {text: "Identify the problem", correct: true}
+        - {text: "Implement the solution"}
+        - {text: "Document findings"}
+        - {text: "Establish a plan of action"}
+    - type: command
+      text: "Show the hop-by-hop path to example.com (give one command)."
+      explanation: "`traceroute example.com` (or mtr)."
+      answers:
+        - "traceroute example.com"
+        - "mtr example.com"
+        - {value: "tracepath example.com", match: exact}
+    - type: command
+      text: "Test whether TCP port 443 is open on host 'web' using netcat."
+      explanation: "`nc -zv web 443` does a zero-I/O port probe."
+      answers:
+        - {value: "nc -zv web 443", match: exact}
+        - {value: "nc -vz web 443", match: exact}
+    - type: mcq
+      text: "ping by IP works, ping by name fails. Which tool confirms the cause?"
+      explanation: "dig/nslookup checks DNS directly — the likely culprit."
+      choices:
+        - {text: "dig / nslookup", correct: true}
+        - {text: "traceroute"}
+        - {text: "tcpdump"}
+        - {text: "curl"}
+    - type: mcq
+      text: "Which tool lets you inspect the actual packets on an interface?"
+      explanation: "tcpdump (or Wireshark) captures raw traffic."
+      choices:
+        - {text: "tcpdump", correct: true}
+        - {text: "ping"}
+        - {text: "ss"}
+        - {text: "dig"}

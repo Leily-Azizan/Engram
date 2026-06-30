@@ -1,0 +1,316 @@
+chapter:
+  title: "Building Images with a Dockerfile"
+  slug: building-images
+  order: 3
+  summary: "Write Dockerfiles, exploit the build cache, and shrink images with multi-stage builds."
+
+lessons:
+  - title: "Dockerfile instructions"
+    slug: dockerfile-instructions
+    order: 1
+    est_minutes: 24
+    summary: "The core instructions and what each one does to the image."
+    body: |
+      ## A first Dockerfile
+
+      ```dockerfile
+      FROM python:3.12-slim            # base image (a starting layer)
+      WORKDIR /app                      # set working dir for later steps
+      COPY requirements.txt .           # copy a file into the image
+      RUN pip install -r requirements.txt   # run a build command -> new layer
+      COPY . .                          # copy the rest of the source
+      EXPOSE 8000                       # document the port (doesn't publish)
+      ENV APP_ENV=prod                  # default env var
+      USER 1000                         # drop root for runtime
+      CMD ["python", "app.py"]          # default process (PID 1)
+      ```
+
+      Build and run:
+
+      ```bash
+      docker build -t myapp:1.0 .       # '.' is the build context
+      docker run -d -p 8000:8000 myapp:1.0
+      ```
+
+      ## Key instructions
+
+      | Instruction | Purpose |
+      |-------------|---------|
+      | `FROM` | base image to build on |
+      | `RUN` | execute a command at build time (new layer) |
+      | `COPY` / `ADD` | bring files into the image |
+      | `WORKDIR` | set the working directory |
+      | `ENV` | set environment variables |
+      | `EXPOSE` | document a port (metadata only) |
+      | `USER` | which user the process runs as |
+      | `CMD` | default command (overridable at run) |
+      | `ENTRYPOINT` | fixed command; CMD becomes its args |
+
+      **CMD vs ENTRYPOINT**: ENTRYPOINT is the thing that always runs; CMD gives
+      default arguments. `docker run img foo` overrides CMD but not ENTRYPOINT.
+    deep_dive: |
+      ### The build cache: the single biggest lever on build speed
+
+      `docker build` executes instructions top to bottom, and **each instruction
+      produces a layer keyed by a cache hash**. For the next build, Docker reuses a
+      cached layer only if *both* match:
+
+      1. the instruction text is identical, **and**
+      2. its inputs are identical — for `RUN`, the parent layer + the command
+         string; for `COPY`/`ADD`, a checksum of the **files being copied**.
+
+      The crucial rule: **once one layer's cache is invalidated, every layer after
+      it is rebuilt too** (its parent changed, so its hash changes). That single
+      fact dictates Dockerfile ordering.
+
+      **The canonical optimisation** — copy dependency manifests *before* source:
+
+      ```dockerfile
+      COPY requirements.txt .          # changes rarely
+      RUN pip install -r requirements.txt   # expensive — cached across code edits
+      COPY . .                         # changes every commit
+      ```
+
+      If you instead `COPY . .` before the install, then *any* source edit changes
+      the copied files → invalidates the COPY layer → forces `pip install` to rerun
+      every build. Same instructions, 10× slower builds, purely from order.
+
+      **`COPY` vs `ADD`:** prefer `COPY` (just copies). `ADD` *also* auto-extracts
+      local tarballs and can fetch URLs — surprising behaviour, so reserve it for
+      when you actually want extraction.
+
+      **The build context:** the `.` you pass is tarred up and sent to the daemon
+      *before* the build starts. A fat context (e.g. `.git`, `node_modules`) is
+      slow and can bust cache; trim it with a **`.dockerignore`**. Also, `COPY`
+      can only see files inside the context — that's why "COPY ../foo" fails.
+
+      **Each RUN is a layer, so chain them:** `RUN apt-get update && apt-get install
+      -y x && rm -rf /var/lib/apt/lists/*` in one instruction avoids leaving the
+      apt cache in an intermediate layer (deleting it in a *later* RUN doesn't
+      shrink the image — the bytes still live in the earlier layer, exactly like
+      the deleted-file case from chapter 1).
+    cards:
+      - front: "Why copy requirements.txt and run install BEFORE copying the rest of the source?"
+        back: "Dependencies change rarely, so that layer stays cached; copying all source first means any code edit invalidates the copy layer and forces a full dependency reinstall every build."
+      - front: "When one Dockerfile layer's cache is invalidated, what happens to the layers after it?"
+        back: "They're all rebuilt — each layer's hash depends on its parent, so a change cascades downward. This is why instruction order matters."
+      - front: "CMD vs ENTRYPOINT?"
+        back: "ENTRYPOINT is the command that always runs; CMD supplies default arguments. `docker run img <args>` overrides CMD but not ENTRYPOINT."
+      - front: "COPY vs ADD — which to prefer and why?"
+        back: "Prefer COPY (predictable file copy). ADD also auto-extracts local tarballs and can download URLs, which is surprising — use it only when you want that."
+      - front: "Why chain apt-get install and cleanup in a single RUN?"
+        back: "Each RUN is a layer; deleting the apt cache in a later layer doesn't reclaim space (the bytes persist in the earlier layer). Clean up within the same RUN."
+      - cloze: "The `docker build .` argument is the build {{c1::context}}, sent to the daemon; trim it with a {{c2::.dockerignore}} file."
+    feynman:
+      - "Explain the cache-cascade rule and how it drives Dockerfile instruction ordering."
+      - "Why doesn't `RUN rm -rf /var/cache` in a later layer shrink the image?"
+    labs:
+      - title: "Build cache speed-up"
+        slug: lab-build-cache
+        difficulty: challenge
+        est_minutes: 25
+        scenario: |
+          A teammate's image rebuilds the whole dependency install on every code
+          change. You'll reproduce the problem and fix it with layer ordering.
+        deliverable: |
+          1. Write a "bad" Dockerfile that `COPY . .` then installs deps; build it,
+             edit a source file, rebuild — note deps reinstall.
+          2. Rewrite it to copy the manifest + install before copying source.
+          3. Rebuild after a source edit and show the install layer is now cached.
+          4. Add a .dockerignore and explain its effect.
+        hints: |
+          - Watch for "Using cache" vs re-running RUN in build output.
+        solution: |
+          ```dockerfile
+          # good ordering
+          FROM python:3.12-slim
+          WORKDIR /app
+          COPY requirements.txt .
+          RUN pip install -r requirements.txt   # cached across code edits
+          COPY . .
+          CMD ["python","app.py"]
+          ```
+          ```
+          # .dockerignore
+          .git
+          __pycache__/
+          *.pyc
+          ```
+          After a code-only edit, `docker build` prints "Using cache" for the pip
+          layer; only the final `COPY . .` and later layers rebuild.
+
+  - title: "Smaller, safer images (multi-stage)"
+    slug: multi-stage-builds
+    order: 2
+    est_minutes: 18
+    summary: "Use multi-stage builds and slim bases to ship tiny, secure images."
+    body: |
+      ## The problem: build tools bloat images
+
+      You need compilers, headers, and dev packages to *build*, but not to *run*.
+      Shipping them bloats the image and widens the attack surface.
+
+      ## Multi-stage builds
+
+      Build in one stage, copy only the result into a clean final stage:
+
+      ```dockerfile
+      # ---- build stage ----
+      FROM golang:1.22 AS build
+      WORKDIR /src
+      COPY . .
+      RUN go build -o /app/server .
+
+      # ---- final stage ----
+      FROM gcr.io/distroless/base-debian12
+      COPY --from=build /app/server /server
+      USER 1000
+      ENTRYPOINT ["/server"]
+      ```
+
+      The final image contains **only the binary** — no Go toolchain. `COPY
+      --from=build` pulls artifacts across stages.
+
+      ## Other size/security wins
+
+      - Start from a **slim/alpine/distroless** base.
+      - Run as a **non-root** `USER`.
+      - Combine and clean `RUN` steps; use `.dockerignore`.
+      - Pin base image versions/digests for reproducibility.
+
+      ```bash
+      docker images myapp        # check the size you shipped
+      docker scout cves myapp:1.0  # scan for known vulnerabilities (if available)
+      ```
+    deep_dive: |
+      ### Why multi-stage works, and what "distroless" really is
+
+      A multi-stage build is just **multiple `FROM`s in one Dockerfile**. Each
+      `FROM` starts a fresh image; only the **last stage** becomes the output
+      image. Earlier stages are built (and cached) but discarded from the final
+      result — except for the exact files you pull forward with `COPY --from=`.
+
+      That's the whole trick: the heavy build stage (compilers, `node_modules`,
+      `.git`, intermediate objects) never contributes a single layer to what you
+      ship. You get the small-runtime benefit *without* hand-pruning, because the
+      final image's layers are only `FROM <runtime base>` + your copied artifact.
+
+      **Distroless / scratch** push this further. `FROM scratch` is the *empty*
+      image — zero bytes, no shell, no package manager, no libc. "Distroless"
+      images add just a runtime (glibc, CA certs, maybe a language runtime) and
+      nothing else. Benefits:
+
+      - **Attack surface**: no shell means no `sh` for an attacker who gets RCE; no
+        package manager means no easy way to pull tools in. CVE count plummets
+        because there are barely any packages to have CVEs.
+      - **Size**: a Go binary on distroless/scratch can be a few MB total.
+
+      The cost: **no shell for debugging** (`docker exec sh` won't work), and you
+      must satisfy your binary's dynamic-linking needs yourself (static-link, or
+      use a distroless base that ships the right libc — this is why "it works in
+      the builder but the final image says 'not found'" almost always means a
+      missing shared library, tying back to the LPIC shared-libraries lesson).
+
+      **Image identity & reproducibility:** the final image is a **manifest** — a
+      JSON listing its config + the digest of each layer — addressed by its own
+      sha256. Pinning `FROM python:3.12-slim@sha256:...` (a digest, not just a tag)
+      means future builds start from byte-identical bytes, so your build is
+      reproducible even if the `3.12-slim` tag is later re-pushed.
+    cards:
+      - front: "How does a multi-stage build produce a small final image?"
+        back: "Only the last FROM stage becomes the output; build-only stages (compilers, deps) are discarded except the specific files pulled forward with `COPY --from=`."
+      - front: "What is a 'distroless' (or scratch) base and its main benefit?"
+        back: "An image with no shell/package manager (scratch is fully empty) — only a runtime. It slashes attack surface and size, at the cost of no in-container debugging shell."
+      - front: "Why run containers as a non-root USER?"
+        back: "Least privilege — if the app is compromised, the attacker isn't root inside the container (and, combined with user namespaces, not root on the host), limiting damage."
+      - front: "Why pin a base image by digest (@sha256:...) instead of just a tag?"
+        back: "Tags are mutable and can be re-pushed; a digest is immutable, so builds start from byte-identical bytes and stay reproducible."
+      - cloze: "`COPY --from={{c1::build}}` pulls artifacts from an earlier build stage into the final image; the empty base image is `FROM {{c2::scratch}}`."
+    feynman:
+      - "Explain how a multi-stage build leaves the compiler behind while keeping the binary."
+      - "Why does a distroless image have far fewer CVEs than an ubuntu-based one?"
+    labs:
+      - title: "Shrink an image with multi-stage"
+        slug: lab-multistage
+        difficulty: challenge
+        est_minutes: 25
+        scenario: |
+          A service image is 900 MB because it ships the whole build toolchain. Cut
+          it down with a multi-stage build.
+        deliverable: |
+          1. Take any compiled-language (or even a `pip install`-heavy) app and
+             write a single-stage Dockerfile; record the image size.
+          2. Convert it to multi-stage: build in a full base, copy only the artifact
+             into a slim/distroless final stage.
+          3. Compare `docker images` sizes before/after.
+          4. Add a non-root USER and explain the security benefit.
+        hints: |
+          - Two `FROM`s; `COPY --from=build`; slim/distroless final base.
+        solution: |
+          ```dockerfile
+          FROM golang:1.22 AS build
+          WORKDIR /src
+          COPY . .
+          RUN CGO_ENABLED=0 go build -o /app/server .
+          FROM gcr.io/distroless/static-debian12
+          COPY --from=build /app/server /server
+          USER 1000
+          ENTRYPOINT ["/server"]
+          ```
+          ```bash
+          docker build -t svc:slim .
+          docker images svc            # MBs instead of ~900MB
+          ```
+          Non-root USER means an RCE in the app doesn't run as root, limiting blast
+          radius.
+
+quiz:
+  title: "Building Images — chapter exam"
+  slug: docker-building-images-exam
+  scope: chapter
+  description: "Dockerfiles, the build cache, and multi-stage builds."
+  questions:
+    - type: mcq
+      text: "Why put `COPY requirements.txt` and the install step before `COPY . .`?"
+      explanation: "Keeps the expensive install layer cached across source-only changes."
+      choices:
+        - {text: "So the dependency-install layer stays cached when only source changes", correct: true}
+        - {text: "Because COPY must come last"}
+        - {text: "To reduce the number of layers to one"}
+        - {text: "It has no effect"}
+    - type: mcq
+      text: "What becomes the final image in a multi-stage build?"
+      explanation: "Only the last stage; earlier stages are discarded except copied artifacts."
+      choices:
+        - {text: "Only the last FROM stage", correct: true}
+        - {text: "All stages merged"}
+        - {text: "The first stage"}
+        - {text: "The largest stage"}
+    - type: true_false
+      text: "Deleting a cache directory in a later RUN instruction reduces the final image size."
+      explanation: "False — the bytes remain in the earlier layer; clean up within the same RUN."
+      choices:
+        - {text: "True"}
+        - {text: "False", correct: true}
+    - type: command
+      text: "Build an image tagged myapp:1.0 from the Dockerfile in the current directory."
+      explanation: "`docker build -t myapp:1.0 .`"
+      answers:
+        - {value: "docker build -t myapp:1.0 .", match: exact}
+        - {value: "docker build -t myapp:1.0 ./", match: exact}
+    - type: mcq
+      text: "ENTRYPOINT vs CMD: which is overridden by `docker run img somearg`?"
+      explanation: "CMD (the default args) is overridden; ENTRYPOINT stays."
+      choices:
+        - {text: "CMD", correct: true}
+        - {text: "ENTRYPOINT"}
+        - {text: "Both"}
+        - {text: "Neither"}
+    - type: mcq
+      text: "Main reason to use a distroless or scratch base?"
+      explanation: "Minimal attack surface and size (no shell/package manager)."
+      choices:
+        - {text: "Smaller image and far less attack surface", correct: true}
+        - {text: "Faster networking"}
+        - {text: "Built-in logging"}
+        - {text: "Automatic restarts"}

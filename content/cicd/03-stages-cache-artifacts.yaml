@@ -1,0 +1,206 @@
+chapter:
+  title: "Build, Test, Cache and Artifacts"
+  slug: stages-cache-artifacts
+  order: 3
+  summary: "Run quality checks fast with caching, matrices, and artifacts passed between jobs."
+
+lessons:
+  - title: "Quality gates, caching, and artifacts"
+    slug: caching-and-artifacts
+    order: 1
+    est_minutes: 22
+    summary: "Speed up pipelines with dependency caching and matrices; share build outputs via artifacts."
+    body: |
+      ## The quality stages
+
+      A solid CI runs these checks on every change — ideally in parallel:
+
+      ```yaml
+      jobs:
+        lint:   { runs-on: ubuntu-latest, steps: [ ... ruff check . ] }
+        types:  { runs-on: ubuntu-latest, steps: [ ... mypy . ] }
+        test:   { runs-on: ubuntu-latest, steps: [ ... pytest --cov ] }
+      ```
+
+      ## Caching dependencies
+
+      Installing deps from scratch every run is slow. **Cache** them, keyed by the
+      lockfile so the cache busts only when dependencies change:
+
+      ```yaml
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: pip-
+      ```
+
+      ## Matrix builds
+
+      Test across versions/OSes in parallel:
+
+      ```yaml
+      strategy:
+        matrix:
+          python: ["3.11", "3.12", "3.13"]
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/setup-python@v5
+          with: { python-version: ${{ matrix.python }} }
+      ```
+
+      ## Artifacts: pass outputs between jobs
+
+      Jobs run on separate runners, so to hand a build to a later job, **upload**
+      then **download** an artifact:
+
+      ```yaml
+      - uses: actions/upload-artifact@v4
+        with: { name: dist, path: dist/ }
+      # ...in a later job:
+      - uses: actions/download-artifact@v4
+        with: { name: dist }
+      ```
+    deep_dive: |
+      ### Cache vs artifact: same problem (ephemeral runners), different jobs
+
+      Both exist because runners are wiped after each job (chapter 1), but they
+      solve **different** needs and you should not confuse them:
+
+      **Cache** = *optimisation*, restored best-effort.
+      - Purpose: avoid re-doing expensive work (downloading dependencies, compiler
+        caches) across runs.
+      - Keyed by a hash of the inputs (e.g. `hashFiles('requirements.txt')`). On a
+        **cache hit** the directory is restored; on a **miss** the job proceeds
+        normally and saves a new cache at the end. `restore-keys` give a fallback
+        prefix so a near-match (older deps) is better than nothing.
+      - It must be **correctness-neutral**: if the cache vanished, the build would
+        still produce the same result, just slower. Never cache things whose
+        staleness could change output. A wrong cache key is the classic CI bug —
+        too broad and you serve stale deps; too narrow and you never hit.
+
+      **Artifact** = *data handoff / output*, stored reliably.
+      - Purpose: pass a produced file (built binary, Docker image tarball, test
+        report, coverage) from one job to a later job (`needs:`), or keep it for
+        humans to download after the run.
+      - It's explicit and durable for the run's retention period, not a best-effort
+        optimisation. The build job *uploads* `dist/`; the deploy job *downloads* it
+        — because they're on different runners with no shared disk.
+
+      Rule of thumb: **cache inputs, upload outputs.** Dependencies → cache;
+      build results → artifact.
+
+      **Why parallelism + matrices matter.** Independent jobs run on separate
+      runners simultaneously, so lint/type/test finish in the time of the slowest,
+      not the sum. A **matrix** fan-outs one job into N parallel jobs (e.g. Python
+      3.11/3.12/3.13) — the scheduler walks the same DAG idea, just wider. This is
+      why well-structured pipelines stay fast as checks grow: you add jobs in
+      parallel rather than steps in series. The cost model is real runner minutes,
+      so caching (less repeated work) and right-sized matrices keep CI both fast and
+      cheap.
+    cards:
+      - front: "Cache vs artifact — when do you use each?"
+        back: "Cache *inputs* (dependencies, build caches) to speed up runs — best-effort, keyed by a hash. Artifact *outputs* (built binaries, images, reports) to reliably hand data to a later job or to humans."
+      - front: "Why key a dependency cache on a hash of the lockfile?"
+        back: "So the cache is reused while dependencies are unchanged and automatically invalidated (busted) only when the lockfile changes — keeping it correct and effective."
+      - front: "Why must a cache be 'correctness-neutral'?"
+        back: "If the cache disappeared, the build must still produce the same result (just slower). Caching something whose staleness changes output causes subtle, wrong builds."
+      - front: "Why do you need artifacts to pass a build from one job to another?"
+        back: "Jobs run on separate, ephemeral runners with no shared disk, so outputs must be explicitly uploaded then downloaded."
+      - front: "What does a build matrix do?"
+        back: "Fans one job out into multiple parallel jobs across versions/OSes (e.g. Python 3.11/3.12/3.13), testing combinations simultaneously."
+      - cloze: "Rule of thumb: {{c1::cache}} inputs (dependencies), {{c2::upload}} outputs (artifacts)."
+    feynman:
+      - "Explain why a too-broad cache key causes stale builds and a too-narrow one never hits."
+      - "Why can't two jobs just share files directly without artifacts?"
+    labs:
+      - title: "Speed up and fan out a pipeline"
+        slug: lab-cache-matrix
+        difficulty: challenge
+        est_minutes: 24
+        scenario: |
+          Your CI reinstalls dependencies every run and only tests one Python
+          version. Make it fast and thorough.
+        deliverable: |
+          Extend a CI workflow to:
+          1. Cache pip downloads keyed by requirements.txt.
+          2. Run tests across a matrix of Python 3.11/3.12/3.13 in parallel.
+          3. Run lint and tests as separate parallel jobs.
+          4. Upload the coverage report as an artifact.
+          Explain why the cache key and the artifact are each necessary.
+        hints: |
+          - actions/cache@v4 with hashFiles(); strategy.matrix; upload-artifact@v4
+        solution: |
+          ```yaml
+          jobs:
+            lint:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: actions/checkout@v4
+                - uses: actions/setup-python@v5
+                  with: { python-version: "3.12" }
+                - run: pip install ruff && ruff check .
+            test:
+              runs-on: ubuntu-latest
+              strategy:
+                matrix: { python: ["3.11","3.12","3.13"] }
+              steps:
+                - uses: actions/checkout@v4
+                - uses: actions/setup-python@v5
+                  with: { python-version: ${{ matrix.python }} }
+                - uses: actions/cache@v4
+                  with:
+                    path: ~/.cache/pip
+                    key: pip-${{ hashFiles('requirements.txt') }}
+                - run: pip install -r requirements.txt
+                - run: pytest --cov --cov-report=xml
+                - uses: actions/upload-artifact@v4
+                  with: { name: coverage-${{ matrix.python }}, path: coverage.xml }
+          ```
+          The cache key (lockfile hash) reuses deps until they change; the artifact
+          carries coverage out of the ephemeral runner for later jobs/humans.
+
+quiz:
+  title: "Build, Test, Cache & Artifacts — chapter exam"
+  slug: cicd-cache-artifacts-exam
+  scope: chapter
+  description: "Caching, matrices, and artifacts."
+  questions:
+    - type: mcq
+      text: "What should you CACHE in CI?"
+      explanation: "Inputs like dependencies/build caches — best-effort speedups."
+      choices:
+        - {text: "Dependencies / build caches (inputs)", correct: true}
+        - {text: "The final built binary"}
+        - {text: "Test reports for humans"}
+        - {text: "Production secrets"}
+    - type: mcq
+      text: "How do you pass a built file from a build job to a deploy job?"
+      explanation: "Upload it as an artifact, then download it in the later job (separate runners)."
+      choices:
+        - {text: "Upload/download an artifact", correct: true}
+        - {text: "Write it to /tmp"}
+        - {text: "Commit it to git"}
+        - {text: "Use an environment variable"}
+    - type: mcq
+      text: "Why key a dependency cache on hashFiles('requirements.txt')?"
+      explanation: "It busts the cache only when dependencies change."
+      choices:
+        - {text: "So the cache invalidates only when dependencies change", correct: true}
+        - {text: "To make the key shorter"}
+        - {text: "To cache the source code"}
+        - {text: "It is required syntax"}
+    - type: mcq
+      text: "A build matrix lets you..."
+      explanation: "Run the job across multiple versions/OSes in parallel."
+      choices:
+        - {text: "Run across multiple versions/OSes in parallel", correct: true}
+        - {text: "Encrypt secrets"}
+        - {text: "Deploy to many servers"}
+        - {text: "Cache dependencies automatically"}
+    - type: true_false
+      text: "A correct CI cache must be 'correctness-neutral' — losing it shouldn't change the build result."
+      explanation: "True — caches only speed things up; they must not affect output correctness."
+      choices:
+        - {text: "True", correct: true}
+        - {text: "False"}

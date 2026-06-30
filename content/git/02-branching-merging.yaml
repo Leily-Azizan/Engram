@@ -1,0 +1,177 @@
+chapter:
+  title: "Branching and Merging"
+  slug: branching-merging
+  order: 2
+  summary: "Work in parallel with branches, and combine work with merges — and why branches are nearly free."
+
+lessons:
+  - title: "Branches and merging"
+    slug: branches-and-merging
+    order: 1
+    est_minutes: 24
+    summary: "Create branches, switch, merge, and resolve conflicts."
+    body: |
+      ## Branching
+
+      A **branch** is an independent line of work. Creating one is instant.
+
+      ```bash
+      git branch                 # list branches
+      git switch -c feature/login   # create + switch (older: git checkout -b)
+      git switch main            # switch back
+      git branch -d feature/login   # delete a merged branch
+      ```
+
+      ## Merging
+
+      Bring a branch's work into another:
+
+      ```bash
+      git switch main
+      git merge feature/login    # merge the feature into main
+      ```
+
+      Two outcomes:
+
+      - **Fast-forward** — if main hasn't moved since the branch started, Git just
+        slides main's pointer forward. No merge commit.
+      - **Three-way merge** — if both diverged, Git creates a **merge commit** with
+        two parents, combining the changes.
+
+      ## Conflicts
+
+      A conflict happens when the same lines changed on both sides. Git marks them:
+
+      ```
+      <<<<<<< HEAD
+      your version
+      =======
+      their version
+      >>>>>>> feature/login
+      ```
+
+      Resolve by editing to the desired result, then:
+
+      ```bash
+      git add conflicted_file
+      git commit                 # completes the merge
+      ```
+    deep_dive: |
+      ### Why branches are nearly free: a branch is just a 41-byte pointer
+
+      In most version-control systems a branch is an expensive copy. In Git a
+      **branch is just a movable reference** — a tiny file under `.git/refs/heads/`
+      containing a single 40-char commit SHA. Creating a branch writes ~41 bytes;
+      that's the entire cost. Switching branches just repoints **`HEAD`** (a file
+      that usually says `ref: refs/heads/main`) and updates your working tree to
+      that commit's tree.
+
+      Commits form a **DAG** (directed acyclic graph): each commit points to its
+      parent(s). A branch label simply marks one commit (the tip); the "branch" is
+      everything reachable by following parents back. When you commit, Git creates
+      the commit and **moves the current branch's pointer** to it — the branch
+      *follows* you.
+
+      **Fast-forward vs three-way, mechanically:**
+      - If `main`'s commit is an **ancestor** of `feature` (main never moved), there
+        is nothing to combine — Git just moves `main`'s pointer up to `feature`'s
+        commit. That's a **fast-forward**; no new commit.
+      - If the two branches **diverged**, Git finds their **merge base** (the most
+        recent common ancestor in the DAG) and does a **three-way merge**:
+        for each file it compares base→ours and base→theirs. Non-overlapping changes
+        are auto-combined; if *both sides changed the same region differently*, it
+        can't decide → **conflict**, and it writes the `<<<<<<<`/`=======`/`>>>>>>>`
+        markers for you to resolve. The result becomes a **merge commit** with
+        **two parents**, recording that both histories joined.
+
+      This is why merges are usually painless: Git isn't guessing line-by-line from
+      scratch, it's using the common ancestor as a reference point (three-way), so
+      it only bothers you about genuinely conflicting edits. And because branches
+      and commits are just pointers and snapshots, "experiment on a branch and throw
+      it away" costs essentially nothing — encouraging lots of small branches, which
+      is the heart of every Git workflow.
+    cards:
+      - front: "What, physically, is a Git branch?"
+        back: "A movable reference — a ~41-byte file under .git/refs/heads/ holding one commit SHA. Creating/deleting branches is nearly free."
+      - front: "Fast-forward merge vs three-way merge?"
+        back: "Fast-forward: the target's tip is an ancestor of the branch, so Git just moves the pointer (no merge commit). Three-way: histories diverged, so Git merges using the common ancestor (merge base) and creates a merge commit with two parents."
+      - front: "What causes a merge conflict?"
+        back: "Both branches changed the same region of a file differently relative to the merge base, so Git can't auto-decide and inserts conflict markers for you to resolve."
+      - front: "What is HEAD?"
+        back: "A pointer to your current location — usually it references the current branch (e.g. `ref: refs/heads/main`), which in turn points to the tip commit."
+      - cloze: "Git finds the most recent common ancestor (the merge {{c1::base}}) and does a {{c2::three-way}} merge; the result is a merge commit with {{c3::two}} parents."
+      - cloze: "Switching branches just repoints {{c1::HEAD}} and updates the working tree to that commit's snapshot."
+    feynman:
+      - "Explain why creating a branch in Git is essentially free."
+      - "Why does using the merge base make three-way merges produce few conflicts?"
+    labs:
+      - title: "Branch, diverge, merge, resolve"
+        slug: lab-merge-conflict
+        difficulty: challenge
+        est_minutes: 24
+        scenario: |
+          You need to confidently create a conflict and resolve it — the skill that
+          stops people fearing Git.
+        deliverable: |
+          1. On `main`, commit a file with a line.
+          2. Branch to `feature`, change that line, commit.
+          3. Back on `main`, change the SAME line differently, commit (now diverged).
+          4. Merge `feature` into `main`, resolve the conflict, and complete the merge.
+          5. Show `git log --graph --oneline` proving a merge commit with two parents.
+        hints: |
+          - Edit out the <<<< ==== >>>> markers, then `git add` + `git commit`.
+          - `git log --graph --oneline --all`
+        solution: |
+          ```bash
+          git switch -c feature
+          echo "feature change" > f.txt && git commit -am "feat"
+          git switch main
+          echo "main change" > f.txt && git commit -am "main"
+          git merge feature            # CONFLICT in f.txt
+          # edit f.txt to the desired final content, removing the markers
+          git add f.txt && git commit  # completes the merge commit
+          git log --graph --oneline --all
+          ```
+
+quiz:
+  title: "Branching & Merging — chapter exam"
+  slug: git-branching-merging-exam
+  scope: chapter
+  description: "Branches, merges, and conflicts."
+  questions:
+    - type: command
+      text: "Create and switch to a new branch called feature/login (modern command)."
+      explanation: "`git switch -c feature/login` (or `git checkout -b feature/login`)."
+      answers:
+        - {value: "git switch -c feature/login", match: exact}
+        - {value: "git checkout -b feature/login", match: exact}
+    - type: mcq
+      text: "When does Git do a fast-forward merge?"
+      explanation: "When the target branch hasn't diverged — its tip is an ancestor of the merged branch."
+      choices:
+        - {text: "When the target's tip is an ancestor of the branch (no divergence)", correct: true}
+        - {text: "Whenever there are conflicts"}
+        - {text: "Only on the main branch"}
+        - {text: "Never; Git always makes a merge commit"}
+    - type: mcq
+      text: "A merge commit has how many parents?"
+      explanation: "Two — it records that two histories joined."
+      choices:
+        - {text: "Two", correct: true}
+        - {text: "One"}
+        - {text: "Zero"}
+        - {text: "As many as branches in the repo"}
+    - type: true_false
+      text: "Creating a branch copies all the project's files."
+      explanation: "False — a branch is just a pointer (a few bytes) to a commit."
+      choices:
+        - {text: "True"}
+        - {text: "False", correct: true}
+    - type: mcq
+      text: "What does Git use to perform a three-way merge?"
+      explanation: "The merge base — the most recent common ancestor of the two branches."
+      choices:
+        - {text: "The merge base (common ancestor)", correct: true}
+        - {text: "The reflog"}
+        - {text: "The remote"}
+        - {text: "The .gitignore"}

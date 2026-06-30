@@ -1,0 +1,269 @@
+chapter:
+  title: "Rebase, Undo and Recover"
+  slug: rebase-undo-recover
+  order: 4
+  summary: "Rewrite history cleanly, undo mistakes safely, and recover 'lost' commits with the reflog."
+
+lessons:
+  - title: "Undoing changes: reset, revert, restore"
+    slug: undoing-changes
+    order: 1
+    est_minutes: 24
+    summary: "The right tool to undo at each stage, and why reset has three modes."
+    body: |
+      ## Match the tool to the situation
+
+      | Goal | Command |
+      |------|---------|
+      | Discard unstaged edits to a file | `git restore file` |
+      | Unstage (keep edits) | `git restore --staged file` |
+      | Amend the last commit | `git commit --amend` |
+      | Undo a commit but keep changes | `git reset --soft HEAD~1` |
+      | Undo a commit, unstage changes | `git reset HEAD~1` (mixed, default) |
+      | Throw a commit away entirely | `git reset --hard HEAD~1` ⚠️ |
+      | Undo a *pushed* commit safely | `git revert <hash>` |
+
+      ## reset vs revert — the key distinction
+
+      - **`reset`** moves your branch pointer *backwards* — it **rewrites history**.
+        Great locally; dangerous on shared branches.
+      - **`revert`** creates a **new commit** that undoes a previous one — history is
+        preserved, so it's safe for commits others already have.
+
+      ```bash
+      git revert a1b2c3d        # safe public undo: adds an "undo" commit
+      git reset --hard a1b2c3d  # local rewind (destroys commits after it)
+      ```
+    deep_dive: |
+      ### `reset`'s three modes map exactly onto the three trees
+
+      Recall the three trees: **HEAD** (last commit), **index** (staged), **working
+      directory** (your files). `git reset` moves the branch pointer to a target
+      commit and then optionally updates the index and working tree — the `--mode`
+      decides how far that update reaches:
+
+      | Mode | Moves branch (HEAD) | Resets index | Resets working dir |
+      |------|:---:|:---:|:---:|
+      | `--soft`  | ✅ | ❌ | ❌ |
+      | `--mixed` (default) | ✅ | ✅ | ❌ |
+      | `--hard`  | ✅ | ✅ | ✅ |
+
+      So:
+      - `reset --soft HEAD~1` rewinds the branch one commit but leaves everything
+        staged → perfect for "re-do that last commit message / squash the last two."
+      - `reset` (mixed) also unstages, leaving your changes as unstaged edits.
+      - `reset --hard` also blows away your working-tree changes — the one that can
+        lose work, because it overwrites the working dir to match the target commit.
+
+      Crucially, `reset` doesn't delete commit objects; it just **moves a pointer**.
+      The old commits still exist in the object database — they've only become
+      *unreferenced* (nothing points to them). They survive until garbage collection
+      (weeks later), which is what makes recovery possible.
+
+      ### The reflog: your safety net
+
+      Git records every move of `HEAD` and branches in the **reflog**
+      (`.git/logs/`). Even after a `reset --hard` or a botched rebase, the commit
+      you "lost" is still in the reflog:
+
+      ```bash
+      git reflog                 # HEAD@{0}, HEAD@{1}, ... every recent position
+      git reset --hard HEAD@{1}  # jump back to where you were before the mistake
+      ```
+
+      This is the single most reassuring fact in Git: because commits are immutable
+      content-addressed objects and the reflog remembers where you've been, almost
+      nothing is truly lost for ~90 days. "I destroyed my work with reset --hard" is
+      almost always recoverable via `git reflog`. That safety is *why* it's fine to
+      experiment with history-editing commands locally.
+    cards:
+      - front: "reset vs revert — which is safe on a branch others have pulled?"
+        back: "`revert` — it adds a NEW commit that undoes the change, preserving history. `reset` rewrites history (moves the pointer back) and is only safe locally."
+      - front: "What do reset's --soft, --mixed, and --hard each touch?"
+        back: "--soft: moves HEAD only (changes stay staged). --mixed (default): also unstages. --hard: also overwrites the working dir (can lose uncommitted work)."
+      - front: "After `git reset --hard` deleted commits, how do you get them back?"
+        back: "`git reflog` to find the commit's old position (HEAD@{n}), then `git reset --hard HEAD@{n}` — reset only moved a pointer; the commit objects still exist."
+      - front: "How do you undo a single already-pushed commit without rewriting history?"
+        back: "`git revert <hash>` — it creates a new commit that reverses that change."
+      - cloze: "`git reset --{{c1::soft}}` keeps changes staged; `--{{c2::hard}}` discards working-tree changes too."
+      - cloze: "Git records every move of HEAD in the {{c1::reflog}}, so 'lost' commits are recoverable for ~90 days."
+    feynman:
+      - "Explain why `reset --hard` feels destructive but rarely loses committed work."
+      - "Map reset's three modes to the three trees (HEAD, index, working dir)."
+    labs:
+      - title: "Destroy and recover a commit"
+        slug: lab-reflog-recover
+        difficulty: challenge
+        est_minutes: 20
+        scenario: |
+          The scariest Git moment is `reset --hard`. You'll deliberately 'lose' a
+          commit and bring it back, so it never scares you again.
+        deliverable: |
+          1. Make two commits on a branch.
+          2. `git reset --hard HEAD~1` to drop the last one; confirm it's gone from log.
+          3. Use `git reflog` to find it and restore it.
+          4. Separately, show how `git revert` would undo a commit while keeping history.
+        hints: |
+          - `git reflog`, `git reset --hard HEAD@{1}`, `git revert <hash>`
+        solution: |
+          ```bash
+          echo a > x && git add x && git commit -m A
+          echo b >> x && git commit -am B
+          git reset --hard HEAD~1     # "lost" commit B
+          git log --oneline           # B is gone
+          git reflog                  # find B at HEAD@{1}
+          git reset --hard HEAD@{1}   # B is back
+          # safe public undo instead:
+          git revert HEAD             # new commit that reverses HEAD
+          ```
+
+  - title: "Rebase: a cleaner history"
+    slug: rebasing
+    order: 2
+    est_minutes: 20
+    summary: "Replay commits onto a new base, tidy history, and the golden rule."
+    body: |
+      ## What rebase does
+
+      **Rebase** replays your commits on top of another base, producing a **linear**
+      history (no merge commit).
+
+      ```bash
+      git switch feature
+      git rebase main            # replay feature's commits on top of latest main
+      ```
+
+      Compare:
+      - **Merge** keeps the true history (a merge commit, two parents) — honest but
+        bushy.
+      - **Rebase** rewrites your commits onto main — clean straight line, but the
+        commits are *new* (new hashes).
+
+      ## Interactive rebase — tidy before sharing
+
+      ```bash
+      git rebase -i HEAD~3       # squash/reorder/edit/drop the last 3 commits
+      ```
+
+      Use it to squash "wip" commits into one clean commit before opening a PR.
+
+      ## The golden rule
+
+      **Never rebase commits that others have based work on** (i.e. already pushed
+      to a shared branch). Rewriting shared history forces everyone else into pain.
+      Rebase your *own* unpushed/feature work; merge shared branches.
+    deep_dive: |
+      ### Why rebase creates new commits — and why that's the whole danger
+
+      A commit's hash is computed from its contents **including its parent's hash**
+      (Git chapter 1). Rebase takes each of your commits and **re-creates** it with
+      a different parent (the new base). Different parent → different hash → these
+      are brand-new commit objects, even though the diffs are the same. The old
+      commits become unreferenced (still recoverable via reflog).
+
+      Mechanically, `git rebase main` on `feature`:
+      1. finds the merge base of `feature` and `main`,
+      2. saves the patch of each `feature` commit after that base,
+      3. moves `feature` to `main`'s tip,
+      4. re-applies each saved patch in order, creating new commits (pausing on any
+         conflict for you to resolve, then `git rebase --continue`).
+
+      That's why the result is linear: there's no second parent, just your commits
+      stacked on the new base.
+
+      **The golden rule follows directly from the hashes.** If you rebase commits
+      that others have already pulled, you've replaced commits `X,Y,Z` with new
+      `X',Y',Z'`. Your collaborators still have `X,Y,Z` in their history and as the
+      ancestry of *their* work. When histories that should share commits no longer
+      do, the next merge/pull produces duplicated commits and ugly conflicts, and
+      anyone who pulls your force-pushed branch has to surgically reconcile. So:
+      rebase is a **local tidiness tool** for history *you alone* own (your feature
+      branch before it's shared); once history is shared, prefer **merge** (which
+      adds, never rewrites) or **revert** (which undoes by adding).
+
+      Merge vs rebase is therefore not "which is better" but "honest history vs
+      clean history, and who else depends on these commits" — teams pick a policy
+      (often: rebase your feature branch to keep it current, then merge it via a PR,
+      sometimes squashed into one commit on main).
+    cards:
+      - front: "What does `git rebase` do to your commits, and to their hashes?"
+        back: "It replays them onto a new base, creating NEW commit objects (new hashes, because each commit's hash includes its parent's). Result: a linear history with no merge commit."
+      - front: "Merge vs rebase — the trade-off?"
+        back: "Merge preserves true history with a merge commit (honest but bushy); rebase rewrites your commits onto the base for a clean linear history (but new hashes — unsafe if shared)."
+      - front: "State the golden rule of rebasing."
+        back: "Never rebase/rewrite commits others have already based work on (pushed to a shared branch). Rebase only your own unpushed/feature commits."
+      - front: "What is interactive rebase good for?"
+        back: "`git rebase -i` to squash, reorder, edit, or drop recent commits — e.g. cleaning up 'wip' commits into one before opening a PR."
+      - cloze: "Rebase replays commits onto a new {{c1::base}}, producing a {{c2::linear}} history; the commits get {{c3::new}} hashes."
+    feynman:
+      - "Explain why rebasing shared commits breaks your teammates' history."
+      - "Why does a rebased commit have a different hash than the original?"
+    labs:
+      - title: "Clean up a messy branch with interactive rebase"
+        slug: lab-interactive-rebase
+        difficulty: challenge
+        est_minutes: 22
+        scenario: |
+          Your feature branch has three messy commits ("wip", "fix typo", "actually
+          works"). Before the PR you want one clean commit, rebased on latest main.
+        deliverable: |
+          1. Create a branch with 3 small "wip"-style commits.
+          2. Use `git rebase -i HEAD~3` to squash them into one well-named commit.
+          3. Rebase the branch onto `main` so it's linear and current.
+          4. Explain why this is safe to do here but would be dangerous after pushing
+             to a shared branch.
+        hints: |
+          - In the interactive editor: keep the first as `pick`, mark the rest `squash`.
+          - `git rebase main`
+        solution: |
+          ```bash
+          git switch -c feature
+          # ...3 commits...
+          git rebase -i HEAD~3        # pick + squash x2, write one good message
+          git rebase main             # replay onto latest main (linear)
+          ```
+          Safe because these commits are unshared (only on your local feature
+          branch). After pushing to a branch others use, rewriting them would change
+          their hashes and break collaborators' history (the golden rule).
+
+quiz:
+  title: "Rebase, Undo & Recover — chapter exam"
+  slug: git-rebase-undo-exam
+  scope: chapter
+  description: "reset/revert, the reflog, and rebase."
+  questions:
+    - type: mcq
+      text: "Which safely undoes a commit that's already been pushed and pulled by others?"
+      explanation: "revert adds a new commit that reverses it — history is preserved."
+      choices:
+        - {text: "git revert", correct: true}
+        - {text: "git reset --hard"}
+        - {text: "git rebase"}
+        - {text: "git commit --amend"}
+    - type: mcq
+      text: "`git reset --soft HEAD~1` does what?"
+      explanation: "Moves the branch back one commit but leaves changes staged."
+      choices:
+        - {text: "Rewinds one commit, keeping changes staged", correct: true}
+        - {text: "Deletes the working directory changes"}
+        - {text: "Creates a revert commit"}
+        - {text: "Pushes to origin"}
+    - type: command
+      text: "Show the history of where HEAD has been (to recover a lost commit)."
+      explanation: "`git reflog`."
+      answers:
+        - {value: "git reflog", match: exact}
+    - type: true_false
+      text: "Rebasing produces commits with the same hashes as the originals."
+      explanation: "False — new parent means new hashes; they're new commit objects."
+      choices:
+        - {text: "True"}
+        - {text: "False", correct: true}
+    - type: mcq
+      text: "The golden rule of rebase is:"
+      explanation: "Don't rewrite history others have based work on."
+      choices:
+        - {text: "Never rebase commits others have already based work on", correct: true}
+        - {text: "Always rebase before every commit"}
+        - {text: "Rebase only the main branch"}
+        - {text: "Never use rebase at all"}

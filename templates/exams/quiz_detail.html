@@ -1,0 +1,27 @@
+{% extends 'base.html' %}
+{% block title %}{{ quiz.title }} · Engram{% endblock %}
+{% block topbar %}{{ quiz.title }}{% endblock %}
+{% block content %}
+<div class="crumbs"><a href="{% url 'quiz_list' %}">Exams</a> / {{ quiz.title }}</div>
+<h1>{{ quiz.title }}</h1>
+<p class="subtitle">{{ quiz.description }}</p>
+
+<div class="card">
+  <p>{{ quiz.question_count }} questions · {{ quiz.get_scope_display }}{% if quiz.time_limit_seconds %} · timed{% endif %}</p>
+  <a class="btn primary" href="{% url 'quiz_take' quiz.slug %}">Start exam</a>
+</div>
+
+{% if attempts %}
+<div class="card">
+  <h3>Your attempts</h3>
+  <ul class="list">
+    {% for a in attempts %}
+      <li>
+        <a href="{% url 'attempt_detail' a.id %}">{{ a.started_at|date:"M j, Y · H:i" }}</a>
+        <span class="badge {% if a.passed %}emerald{% else %}amber{% endif %}">{{ a.score }}/{{ a.max_score }} · {{ a.percent }}%</span>
+      </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+{% endblock %}

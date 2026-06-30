@@ -1,0 +1,159 @@
+chapter:
+  title: "Team Workflows"
+  slug: workflows
+  order: 5
+  summary: "How teams organize branches and pull requests — and the trade-offs behind each model."
+
+lessons:
+  - title: "Branching strategies and pull requests"
+    slug: branching-strategies
+    order: 1
+    est_minutes: 20
+    summary: "Feature branches, trunk-based development, PRs, and merge policies."
+    body: |
+      ## The pull-request loop (most common)
+
+      ```
+      main ──●──●──────────────●  (protected; only merges via PR)
+              \                /
+      feature  ●──●──●────────   (branch, push, open PR, review, merge)
+      ```
+
+      ```bash
+      git switch -c feature/x main
+      # ...work, commit, push...
+      git push -u origin feature/x
+      # open a Pull Request → CI runs → review → merge → delete branch
+      ```
+
+      ## Common strategies
+
+      | Strategy | Idea | Good for |
+      |----------|------|----------|
+      | **Feature branch + PR** | short-lived branches merged via review | most teams |
+      | **Trunk-based** | tiny commits to main daily, behind feature flags | high-velocity, strong CI |
+      | **Git Flow** | long-lived develop/release/hotfix branches | scheduled releases (heavier) |
+
+      ## Merge policies for the PR
+
+      - **Merge commit** — preserves all commits + a merge commit (full history).
+      - **Squash merge** — collapses the PR into one clean commit on main (tidy
+        history; common default).
+      - **Rebase merge** — replays PR commits onto main, linear, no merge commit.
+
+      ## Habits that keep history sane
+
+      - Small, focused PRs; clear commit messages.
+      - Keep your branch current (`git pull --rebase` or rebase on main).
+      - Protect `main` (require PR + green CI).
+    deep_dive: |
+      ### Why short-lived branches + CI beat long-lived branches
+
+      Every branching model is really managing one risk: **merge divergence grows
+      with time**. The longer a branch lives away from `main`, the more both sides
+      change, the bigger the eventual three-way merge, and the more likely painful
+      conflicts (and "it worked on my branch" integration bugs). All the popular
+      strategies are different answers to that risk:
+
+      - **Trunk-based development** minimises divergence by integrating to `main`
+        constantly (often daily), keeping unfinished work dark behind **feature
+        flags** rather than on a long branch. Divergence stays near zero, so merges
+        are trivial — but it *requires* strong automated tests (CI) on every commit,
+        because main must always be releasable. This is why trunk-based and CI/CD
+        (next course) are deeply linked: continuous integration literally means
+        integrating continuously.
+      - **Feature-branch + PR** accepts a little divergence for the benefit of
+        **code review** and a CI gate before code reaches main. Keeping branches
+        *short-lived* (hours/days, not weeks) keeps the divergence small.
+      - **Git Flow's** long-lived `develop`/`release` branches maximise structure
+        for scheduled releases but also maximise divergence and merge overhead —
+        which is why fast-moving teams have largely moved away from it.
+
+      **Merge vs squash vs rebase merge** is the same honesty-vs-cleanliness choice
+      from the rebase chapter, applied at the PR boundary:
+      - *Merge commit* keeps every WIP commit + records the integration point
+        (great for auditing, noisier log).
+      - *Squash* turns a whole PR into one semantic commit on main (clean, bisectable
+        history; loses intra-PR granularity) — a popular default.
+      - *Rebase merge* gives linear history with each commit preserved but no merge
+        commit.
+
+      **Branch protection** (require PR review + passing CI, block force-push to
+      `main`) is what operationalises all this: it makes `main` a trustworthy,
+      always-green base that everyone branches from and integrates back into
+      quickly. The whole point is to keep the distance between any developer's work
+      and shippable `main` *small*, because small distances mean cheap merges, fast
+      review, and safe continuous delivery.
+    cards:
+      - front: "Why keep feature branches short-lived?"
+        back: "Divergence from main grows with time, making merges bigger and more conflict-prone. Short branches keep the eventual three-way merge small and integration bugs rare."
+      - front: "What is trunk-based development, and what does it require?"
+        back: "Integrating tiny changes to main very frequently (unfinished work hidden behind feature flags) to minimise divergence. It requires strong CI so main stays always-releasable."
+      - front: "Merge commit vs squash vs rebase merge for a PR?"
+        back: "Merge commit: keeps all commits + records the integration (full history). Squash: collapses the PR into one clean commit (tidy, common default). Rebase merge: linear, commits preserved, no merge commit."
+      - front: "What does branch protection on main enforce, and why?"
+        back: "Require PR review + passing CI and block force-push, so main stays trustworthy and always-green — the base everyone branches from and integrates into quickly."
+      - cloze: "Trunk-based development hides unfinished work behind {{c1::feature flags}} and depends on strong {{c2::CI}} to keep main releasable."
+    feynman:
+      - "Explain why a branch that lives for three weeks is risky to merge."
+      - "Connect 'continuous integration' to why trunk-based development needs good tests."
+    labs:
+      - title: "Design a team workflow"
+        slug: lab-design-workflow
+        difficulty: core
+        est_minutes: 20
+        scenario: |
+          You're setting up Git practices for a small team shipping a web app
+          several times a week.
+        deliverable: |
+          Decide and justify:
+          1. A branching strategy (and why over the alternatives).
+          2. A PR merge policy (merge/squash/rebase) and why.
+          3. Three branch-protection rules for `main`.
+          4. How developers keep their branch current to avoid big merges.
+        hints: |
+          - Short-lived feature branches + PR + squash is a sane default; protect main.
+        solution: |
+          1. **Short-lived feature branches + PR** — review + CI gate, low divergence,
+             simpler than Git Flow, less risky than trunk-without-flags for a small team.
+          2. **Squash merge** — one clean, bisectable commit per PR on main.
+          3. Protect main: require PR review, require green CI, block force-push
+             (and require branches be up to date before merge).
+          4. Rebase/pull --rebase onto main regularly so the final merge is tiny.
+
+quiz:
+  title: "Team Workflows — chapter exam"
+  slug: git-workflows-exam
+  scope: chapter
+  description: "Branching strategies, PRs, and merge policies."
+  questions:
+    - type: mcq
+      text: "Why keep feature branches short-lived?"
+      explanation: "Less divergence from main → smaller, safer merges and fewer integration bugs."
+      choices:
+        - {text: "To minimise divergence and keep merges small", correct: true}
+        - {text: "To use less disk space"}
+        - {text: "Because Git limits branch age"}
+        - {text: "To avoid writing tests"}
+    - type: mcq
+      text: "Trunk-based development relies most on what?"
+      explanation: "Frequent integration to main requires strong automated tests (CI) and feature flags."
+      choices:
+        - {text: "Strong CI and feature flags", correct: true}
+        - {text: "Long-lived release branches"}
+        - {text: "Manual testing only"}
+        - {text: "Avoiding pull requests"}
+    - type: mcq
+      text: "Which PR merge policy collapses a whole PR into one commit on main?"
+      explanation: "Squash merge."
+      choices:
+        - {text: "Squash merge", correct: true}
+        - {text: "Merge commit"}
+        - {text: "Rebase merge"}
+        - {text: "Fast-forward only"}
+    - type: true_false
+      text: "Protecting main (requiring PRs + green CI) helps keep it always releasable."
+      explanation: "True — it's how teams keep main trustworthy."
+      choices:
+        - {text: "True", correct: true}
+        - {text: "False"}

@@ -1,0 +1,9 @@
+# Core
+Django>=5.2,<6.1
+
+# Content rendering (recommended). The app falls back to a minimal built-in
+# renderer if this is missing, but install it for full Markdown fidelity.
+markdown>=3.6
+
+# Optional: nicer syntax highlighting for code blocks. Auto-detected.
+Pygments>=2.18

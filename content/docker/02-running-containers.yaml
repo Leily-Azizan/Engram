@@ -1,0 +1,277 @@
+chapter:
+  title: "Running and Managing Containers"
+  slug: running-containers
+  order: 2
+  summary: "The lifecycle commands you'll use daily, and how a container's PID 1 changes how signals and logs behave."
+
+lessons:
+  - title: "Run, inspect, and control containers"
+    slug: run-and-control
+    order: 1
+    est_minutes: 22
+    summary: "docker run flags, the container lifecycle, and getting inside a running container."
+    body: |
+      ## The workhorse: docker run
+
+      ```bash
+      docker run nginx                       # foreground, attached
+      docker run -d --name web nginx         # detached (background), named
+      docker run -d -p 8080:80 nginx         # publish host:container port
+      docker run -it ubuntu bash             # interactive shell (-i -t)
+      docker run --rm alpine echo hi         # auto-remove when it exits
+      docker run -e ENV=prod -m 256m nginx   # env var + memory limit
+      ```
+
+      ## The lifecycle
+
+      ```
+      created ─run─► running ─stop─► exited ─start─► running
+                         │                    └─rm─► (gone)
+                         └─pause─► paused
+      ```
+
+      ```bash
+      docker ps                # running containers
+      docker ps -a             # include stopped
+      docker stop web          # graceful (SIGTERM, then SIGKILL after grace)
+      docker start web
+      docker restart web
+      docker rm web            # remove a stopped container (-f to force)
+      docker logs -f web       # follow stdout/stderr
+      docker exec -it web bash # get a shell INSIDE a running container
+      docker inspect web       # full JSON: mounts, network, env, state
+      docker stats             # live CPU/mem/IO per container
+      ```
+
+      `exec` starts a *new* process in the container's namespaces; the container
+      keeps running its main process either way.
+    deep_dive: |
+      ### PID 1, signals, and why containers sometimes won't die
+
+      A container runs **one main process as PID 1**, and PID 1 is special in
+      Linux — which causes two classic gotchas.
+
+      **1. Signal handling.** `docker stop` sends **SIGTERM**, waits a grace period
+      (default 10s), then **SIGKILL**. But the kernel does *not* install default
+      signal handlers for PID 1: a process that doesn't explicitly handle SIGTERM
+      will **ignore it** as PID 1, so `docker stop` hangs the full 10s then hard-
+      kills it. Worse, the shell form `CMD npm start` runs your app as a *child* of
+      a `/bin/sh -c` that becomes PID 1 and forwards nothing — so Ctrl-C/stop never
+      reaches your app. Fixes: use the **exec form** (`CMD ["node","app.js"]`) so
+      your app *is* PID 1, handle SIGTERM in your app, or add a tiny init with
+      `docker run --init` (or `tini`) to forward signals and reap zombies.
+
+      **2. Zombie reaping.** When a child process exits, its parent must `wait()`
+      on it or it becomes a **zombie**. Normally PID 1 (init/systemd) reaps
+      orphans — but in a container *your app* is PID 1, and most apps don't reap.
+      Long-running containers that spawn subprocesses can accumulate zombies. `--init`
+      inserts a real init as PID 1 to handle this.
+
+      **3. Exit codes drive restart policy.** When PID 1 exits, the container
+      exits with that code (`docker ps -a` shows it; `0` = clean). Restart policies
+      react to it:
+
+      ```bash
+      docker run --restart unless-stopped web   # restart unless you stopped it
+      docker run --restart on-failure:3 web     # retry up to 3 times on non-zero
+      ```
+
+      So "my container won't stop gracefully" and "my container leaks zombies" are
+      both PID-1 problems, and the cure is making PID 1 a proper signal-handling,
+      child-reaping process — your app via exec form, or an init shim.
+
+      **What `exec` really does:** it `setns()`-es into the container's existing
+      namespaces and starts a new process there. That process is *not* PID 1 and
+      its death doesn't stop the container — which is why you debug with `exec` but
+      configure the lifecycle around the main process.
+    cards:
+      - front: "What signal does `docker stop` send, and what happens if the process ignores it?"
+        back: "SIGTERM, then SIGKILL after a grace period (default 10s). As PID 1, a process with no SIGTERM handler ignores it, so stop hangs the full grace period then hard-kills."
+      - front: "Why prefer the exec form `CMD [\"node\",\"app.js\"]` over the shell form `CMD node app.js`?"
+        back: "Exec form makes your app PID 1 so it receives signals directly; shell form runs it under `/bin/sh -c` (PID 1) which usually doesn't forward SIGTERM, so stop/Ctrl-C never reach your app."
+      - front: "What does `docker run --init` solve?"
+        back: "It adds a tiny init as PID 1 to forward signals to your app and reap zombie child processes."
+      - front: "Difference between `docker run` and `docker exec`?"
+        back: "`run` creates and starts a NEW container (with its main process as PID 1). `exec` starts an extra process inside an already-running container's namespaces (not PID 1)."
+      - cloze: "`docker run -d` runs {{c1::detached}}, `-p 8080:80` publishes a {{c2::port}}, and `-it` gives an {{c3::interactive}} terminal."
+      - cloze: "A container's main process runs as PID {{c1::1}}; when it exits, the container {{c2::exits}} with its exit code."
+    feynman:
+      - "Explain why an app started with the shell-form CMD often ignores `docker stop`."
+      - "Why can a long-running container accumulate zombie processes, and how does --init fix it?"
+    labs:
+      - title: "Graceful shutdown investigation"
+        slug: lab-graceful-stop
+        difficulty: challenge
+        est_minutes: 22
+        scenario: |
+          A container takes a full 10 seconds to stop. You suspect a PID-1 signal
+          problem and want to prove the fix.
+        deliverable: |
+          1. Run a container whose process ignores SIGTERM (e.g. `docker run -d --name slow
+             ubuntu sleep 1000`) and time `docker stop slow`.
+          2. Explain why it takes ~10s.
+          3. Re-run with `--init` and/or design a CMD that handles SIGTERM, and
+             show stop is now fast.
+          4. State the exit code difference between a clean stop and a SIGKILL.
+        hints: |
+          - `time docker stop slow`
+          - `docker run --init`, exec-form CMD, app-level SIGTERM handler
+        solution: |
+          ```bash
+          docker run -d --name slow ubuntu sleep 1000
+          time docker stop slow         # ~10s: sleep as PID 1 ignores SIGTERM
+          docker rm slow
+          docker run -d --init --name fast ubuntu sleep 1000
+          time docker stop fast         # fast: tini (PID 1) forwards the signal
+          ```
+          Clean stop → exit code 0; SIGKILL after timeout → 137 (128+9).
+
+  - title: "Container output, logs and resource use"
+    slug: logs-and-resources
+    order: 2
+    est_minutes: 16
+    summary: "Where container logs come from, and how to cap CPU/memory."
+    body: |
+      ## Logs are just stdout/stderr
+
+      The container's PID 1 writes to **stdout/stderr**; Docker's logging driver
+      captures those streams. That's why apps in containers should log to the
+      console, **not** to files inside the container.
+
+      ```bash
+      docker logs web              # all logs
+      docker logs -f --tail 50 web # follow last 50 lines
+      ```
+
+      The default `json-file` driver stores logs on the host under
+      `/var/lib/docker/containers/<id>/`. Without rotation these grow forever —
+      cap them:
+
+      ```bash
+      docker run --log-opt max-size=10m --log-opt max-file=3 web
+      ```
+
+      ## Limiting resources (cgroups)
+
+      ```bash
+      docker run -m 512m --memory-swap 512m web   # hard memory cap
+      docker run --cpus 1.5 web                    # 1.5 CPU cores worth
+      docker stats                                 # live usage
+      ```
+
+      Hitting the memory limit gets the process **OOM-killed** (exit 137) — the
+      container's cgroup enforces it.
+    deep_dive: |
+      ### Why "log to stdout" is a rule, not a preference
+
+      In a normal server you log to `/var/log/app.log` and rotate it. In a
+      container that's an anti-pattern, and the reasons are structural:
+
+      - The container filesystem is **ephemeral** (copy-on-write writable layer).
+        A log file inside it dies with the container and bloats the writable layer
+        meanwhile.
+      - Orchestrators (Compose, Kubernetes) and the whole observability ecosystem
+        assume the **12-factor** model: treat logs as an **event stream** the
+        process writes to stdout/stderr, and let the platform collect, route, and
+        store it. Docker's **logging driver** sits on those streams — `json-file`
+        (default), `journald`, `local`, or shipping straight to `fluentd`/`awslogs`/
+        `gelf`. Your app shouldn't know or care where logs end up.
+
+      Under the hood, Docker connects the container's stdout/stderr to the daemon
+      via the container's I/O streams; the chosen driver writes/forwards each line
+      (json-file wraps every line in JSON with a timestamp and stream name, which
+      is what `docker logs` reads back). Because it's a stream, `docker logs -f`
+      is just tailing that pipe.
+
+      **Resource limits are the same cgroup machinery from chapter 1.** `-m 512m`
+      writes `memory.max` in the container's cgroup; the kernel's OOM killer fires
+      when the cgroup's usage would exceed it, killing the process with exit
+      **137** (128 + signal 9). `--cpus 1.5` sets cgroup CPU quota/period so the
+      scheduler throttles the container to 1.5 cores of runtime. None of this is
+      Docker-specific magic — Docker is writing kernel cgroup files, and the
+      kernel does the enforcing. That's why `docker stats` numbers line up with
+      what you'd read from `/sys/fs/cgroup`.
+    cards:
+      - front: "Where should a containerized app send its logs, and why?"
+        back: "To stdout/stderr (an event stream), not to files inside the container — the filesystem is ephemeral and the platform's logging driver collects the streams (12-factor)."
+      - front: "What exit code indicates a container was OOM-killed for exceeding its memory limit?"
+        back: "137 (128 + signal 9 / SIGKILL) — the cgroup memory limit triggered the kernel OOM killer."
+      - front: "How do you stop json-file container logs from filling the host disk?"
+        back: "Cap them: `--log-opt max-size=10m --log-opt max-file=3` (or use a different logging driver)."
+      - cloze: "`docker run -m 512m` sets a memory cap via {{c1::cgroups}}; exceeding it gets the process {{c2::OOM-killed}} (exit 137)."
+    feynman:
+      - "Explain why logging to a file inside a container fights against how containers and orchestrators work."
+    labs:
+      - title: "Cap a memory hog"
+        slug: lab-memory-limit
+        difficulty: core
+        est_minutes: 16
+        scenario: |
+          A container occasionally balloons in memory and threatens the host. You
+          must bound it and observe what happens at the limit.
+        deliverable: |
+          1. Run a container with a 64m memory limit.
+          2. Inside it, allocate more than 64m (e.g. with a small stress command)
+             and observe the OOM kill.
+          3. Show its exit code and confirm it's the OOM signature.
+          4. Show live usage with `docker stats` for a normal container.
+        hints: |
+          - `docker run -m 64m ...`; `docker inspect --format '{{.State.ExitCode}}'`
+          - OOM exit code is 137.
+        solution: |
+          ```bash
+          docker run -m 64m --name hog python:3.12-slim \
+            python -c "x=' '*200_000_000"     # allocate ~200MB > 64m
+          docker inspect --format '{{.State.OOMKilled}} {{.State.ExitCode}}' hog
+          # -> true 137
+          docker stats --no-stream            # live CPU/mem for running containers
+          ```
+
+quiz:
+  title: "Running & Managing Containers — chapter exam"
+  slug: docker-running-containers-exam
+  scope: chapter
+  description: "Lifecycle, PID 1/signals, logs, and resource limits."
+  questions:
+    - type: command
+      text: "Run nginx detached, named 'web', publishing host port 8080 to container port 80."
+      explanation: "`docker run -d --name web -p 8080:80 nginx` (flag order may vary)."
+      answers:
+        - {value: "docker run -d --name web -p 8080:80 nginx", match: exact}
+        - {value: "docker run -d -p 8080:80 --name web nginx", match: exact}
+    - type: mcq
+      text: "`docker stop` first sends which signal?"
+      explanation: "SIGTERM, then SIGKILL after the grace period."
+      choices:
+        - {text: "SIGTERM", correct: true}
+        - {text: "SIGKILL"}
+        - {text: "SIGHUP"}
+        - {text: "SIGINT"}
+    - type: mcq
+      text: "Why prefer the exec form CMD [\"node\",\"app.js\"]?"
+      explanation: "Your app becomes PID 1 and receives signals directly."
+      choices:
+        - {text: "The app becomes PID 1 and gets signals directly", correct: true}
+        - {text: "It runs faster"}
+        - {text: "It uses less memory"}
+        - {text: "It enables port publishing"}
+    - type: command
+      text: "Open an interactive bash shell inside the running container 'web'."
+      explanation: "`docker exec -it web bash` starts a new process in its namespaces."
+      answers:
+        - {value: "docker exec -it web bash", match: exact}
+        - {value: "docker exec -it web /bin/bash", match: exact}
+    - type: mcq
+      text: "A container exits with code 137. What most likely happened?"
+      explanation: "137 = 128+9 (SIGKILL) — commonly an OOM kill at the memory limit."
+      choices:
+        - {text: "It was killed (often OOM at the memory limit)", correct: true}
+        - {text: "It exited cleanly"}
+        - {text: "It is still running"}
+        - {text: "The image was not found"}
+    - type: true_false
+      text: "A containerized app should write its logs to a file inside the container."
+      explanation: "False — log to stdout/stderr; the filesystem is ephemeral and the logging driver collects the streams."
+      choices:
+        - {text: "True"}
+        - {text: "False", correct: true}

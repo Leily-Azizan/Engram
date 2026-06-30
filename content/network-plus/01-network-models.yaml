@@ -1,0 +1,272 @@
+chapter:
+  title: "Network Models: OSI and TCP/IP"
+  slug: network-models
+  order: 1
+  summary: "The layered models that organise how data moves across a network — your mental map for everything else."
+
+lessons:
+  - title: "The OSI model"
+    slug: osi-model
+    order: 1
+    est_minutes: 22
+    summary: "Seven layers, what each does, and why layering matters."
+    body: |
+      ## Why layers?
+
+      Networking is hard, so we split it into **layers**. Each layer does one
+      job and talks only to the layers directly above and below it. This lets you
+      swap, say, Wi-Fi for Ethernet without rewriting your web app.
+
+      ## The 7 layers (top to bottom)
+
+      | # | Layer | Job | Examples |
+      |---|-------|-----|----------|
+      | 7 | Application | Interface to apps | HTTP, DNS, SMTP |
+      | 6 | Presentation | Formatting, encryption | TLS, JPEG, ASCII |
+      | 5 | Session | Sets up/maintains sessions | RPC, NetBIOS |
+      | 4 | Transport | End-to-end delivery, ports | TCP, UDP |
+      | 3 | Network | Logical addressing, routing | IP, ICMP, routers |
+      | 2 | Data Link | Local delivery, MAC addressing | Ethernet, switches |
+      | 1 | Physical | Bits on the wire | cables, radio, hubs |
+
+      A classic mnemonic top→bottom: **A**ll **P**eople **S**eem **T**o **N**eed
+      **D**ata **P**rocessing.
+
+      ## PDUs — what data is called at each layer
+
+      - L4: **segment** (TCP) / datagram (UDP)
+      - L3: **packet**
+      - L2: **frame**
+      - L1: **bits**
+
+      ## Encapsulation
+
+      As data goes *down* the stack, each layer wraps it with its own header
+      (encapsulation). On the way *up* the other side, each layer strips its
+      header (de-encapsulation). Think of nested envelopes.
+    deep_dive: |
+      ### Encapsulation in bytes: how the headers actually nest
+
+      "Encapsulation" sounds abstract until you watch the bytes. Each layer
+      **prepends its own header** (and L2 also appends a trailer) to the data
+      handed down from above. Sending `GET /` over HTTPS builds this onion:
+
+      ```
+      [ Ethernet hdr | IP hdr | TCP hdr | TLS | HTTP data | Ethernet trailer ]
+        L2             L3       L4        L6     L7
+      ```
+
+      - L7 produces the HTTP bytes → hands them to L4.
+      - **L4 (TCP)** prepends a header with **source & destination ports** and
+        sequence numbers → this is now a *segment*.
+      - **L3 (IP)** prepends source & destination **IP addresses** + TTL → a
+        *packet*.
+      - **L2 (Ethernet)** prepends source & destination **MAC** addresses and
+        appends a CRC checksum → a *frame*.
+      - **L1** turns the frame's bits into signals on the wire.
+
+      Each layer only reads **its own** header. A router opens the L3 header to
+      decide the next hop, **rewrites the L2 header** (new source/dest MAC for the
+      next link) but leaves L3/L4/L7 untouched; a switch only ever looks at L2.
+      This strict separation is *why* you can change Wi-Fi for Ethernet (swap L1/L2)
+      without touching TCP or your app — each layer trusts the one below to deliver
+      its payload, and only talks to its peer layer on the other host.
+
+      **MTU and fragmentation** fall out of this: the L2 frame has a max size
+      (typically 1500-byte MTU on Ethernet). If an IP packet is too big for the
+      link, L3 must **fragment** it (or, with "don't fragment" set, the sender gets
+      told to send smaller packets — path MTU discovery). De-encapsulation on the
+      far side reverses every step: L2 checks the CRC and strips its header, L3
+      checks the destination IP, L4 reassembles segments by sequence number and
+      hands the bytes to the right port — i.e., to your application.
+    cards:
+      - front: "Which OSI layer handles logical addressing and routing between networks?"
+        back: "Layer 3, the Network layer (IP, routers)."
+      - front: "Which OSI layer introduces ports and end-to-end delivery (TCP/UDP)?"
+        back: "Layer 4, the Transport layer."
+      - front: "What is the Layer 2 PDU called, and what device operates there?"
+        back: "A frame; switches operate at Layer 2 using MAC addresses."
+      - cloze: "In the OSI model, switches operate at Layer {{c1::2}} (Data Link) while routers operate at Layer {{c2::3}} (Network)."
+      - cloze: "The Layer 3 PDU is a {{c1::packet}}, and the Layer 4 (TCP) PDU is a {{c2::segment}}."
+    feynman:
+      - "Explain encapsulation using the nested-envelopes analogy."
+      - "Why does layering let you change the physical medium without changing the application?"
+    labs:
+      - title: "Map a request to the layers"
+        slug: lab-map-layers
+        difficulty: intro
+        est_minutes: 15
+        scenario: |
+          You open a browser and load https://example.com. Your task is to reason
+          about which OSI layer each piece of the journey belongs to.
+        deliverable: |
+          For each item, name the OSI layer (1-7):
+          1. The TLS handshake encrypting the page
+          2. The MAC address of your laptop's NIC
+          3. The IP address of example.com
+          4. The TCP port 443
+          5. The Wi-Fi radio signal
+          6. The HTTP GET request
+        hints: |
+          - TLS = encryption/presentation; MAC = data link; IP = network; port = transport.
+        solution: |
+          1. TLS → Layer 6 (Presentation)
+          2. MAC address → Layer 2 (Data Link)
+          3. IP address → Layer 3 (Network)
+          4. TCP port 443 → Layer 4 (Transport)
+          5. Wi-Fi radio → Layer 1 (Physical)
+          6. HTTP GET → Layer 7 (Application)
+
+  - title: "TCP/IP model and TCP vs UDP"
+    slug: tcpip-and-transport
+    order: 2
+    est_minutes: 22
+    summary: "The practical 4-layer model and the crucial TCP vs UDP distinction."
+    body: |
+      ## The TCP/IP model
+
+      The real internet runs on the TCP/IP model — a leaner 4-layer view that
+      maps onto OSI:
+
+      | TCP/IP layer | OSI equivalent |
+      |--------------|----------------|
+      | Application  | 5–7 (App/Presentation/Session) |
+      | Transport    | 4 |
+      | Internet     | 3 |
+      | Link / Network Access | 1–2 |
+
+      ## TCP vs UDP — the big one
+
+      Both live at the Transport layer and use **ports**, but they trade off
+      reliability for speed.
+
+      | | TCP | UDP |
+      |-|-----|-----|
+      | Connection | Connection-oriented (handshake) | Connectionless |
+      | Reliability | Guaranteed, ordered, retransmits | Best-effort, may drop/reorder |
+      | Overhead | Higher | Lower |
+      | Use cases | Web, SSH, email, file transfer | DNS, DHCP, VoIP, video, games |
+
+      ### The TCP three-way handshake
+
+      ```
+      Client → SYN →      Server
+      Client ← SYN/ACK ←  Server
+      Client → ACK →      Server   (connection established)
+      ```
+
+      UDP just sends — no handshake, no acknowledgement. Great when a little loss
+      is fine but latency matters (a dropped frame of video is better than a
+      stalled stream).
+    deep_dive: |
+      ### What the handshake actually negotiates
+
+      The three-way handshake isn't just "hello" — it synchronises state on both
+      ends so reliable delivery is possible.
+
+      - **SYN** carries the client's starting **sequence number** (ISN, randomised
+        to resist spoofing) plus options like **MSS** (max segment size) and
+        **window scale**.
+      - **SYN-ACK** acknowledges the client's ISN (ack = ISN+1) and sends the
+        server's own ISN.
+      - **ACK** confirms the server's ISN. Both ends now know each other's sequence
+        numbers and agreed options — the connection is **ESTABLISHED**.
+
+      **How reliability is built on this.** Every byte has a sequence number; the
+      receiver returns **ACKs** for what arrived, and unacknowledged data is
+      **retransmitted** after a timeout. A **sliding window** keeps several segments
+      in flight for throughput, while **congestion control** (slow start, etc.)
+      backs off when the network drops packets. Connections close with FIN/ACK (or
+      an abrupt RST).
+
+      **Why UDP is "lighter" in one picture.** UDP has no sequence numbers, ACKs,
+      windows, or connection state — just an 8-byte header (ports, length,
+      checksum) around your data. Nothing to set up, nothing to wait for: exactly
+      why DNS, DHCP and real-time media use it, since a lost packet costs less than
+      waiting for a retransmit. Protocols that want reliability over UDP (like
+      QUIC) rebuild it themselves in user space.
+    cards:
+      - front: "Give two reasons you'd choose TCP over UDP."
+        back: "You need reliable, ordered delivery with retransmission of lost data (e.g. web, SSH, file transfer)."
+      - front: "Name three protocols/services that typically use UDP and why."
+        back: "DNS, DHCP, VoIP/streaming — low overhead and latency matter more than guaranteed delivery."
+      - front: "Describe the TCP three-way handshake."
+        back: "SYN (client→server), SYN-ACK (server→client), ACK (client→server) — then the connection is established."
+      - cloze: "TCP is {{c1::connection-oriented}} and reliable, while UDP is {{c2::connectionless}} and best-effort."
+    feynman:
+      - "Explain why video calls often use UDP even though packets can be lost."
+      - "Walk through the three-way handshake and what each flag means."
+    labs:
+      - title: "Pick the right transport"
+        slug: lab-pick-transport
+        difficulty: core
+        est_minutes: 15
+        scenario: |
+          You're designing several services and must choose TCP or UDP for each,
+          with justification.
+        deliverable: |
+          Choose TCP or UDP and justify in one sentence each:
+          1. A banking transaction API
+          2. A live multiplayer game's position updates
+          3. A large file download
+          4. A DNS lookup
+          5. A live video stream
+        hints: |
+          - "Must not lose data" → TCP. "Latency over perfection" → UDP.
+        solution: |
+          1. Banking API → **TCP** (must be reliable and ordered).
+          2. Game position updates → **UDP** (newest position matters; retransmits would lag).
+          3. File download → **TCP** (every byte must arrive intact).
+          4. DNS lookup → **UDP** (tiny, fast; falls back to TCP if needed).
+          5. Live video → **UDP** (smoothness beats occasional dropped frames).
+
+quiz:
+  title: "Network Models — chapter exam"
+  slug: netplus-network-models-exam
+  scope: chapter
+  description: "OSI, TCP/IP, and TCP vs UDP."
+  questions:
+    - type: mcq
+      text: "At which OSI layer do routers operate?"
+      explanation: "Routers forward packets using IP addresses at Layer 3 (Network)."
+      choices:
+        - {text: "Layer 3 (Network)", correct: true}
+        - {text: "Layer 2 (Data Link)"}
+        - {text: "Layer 4 (Transport)"}
+        - {text: "Layer 1 (Physical)"}
+    - type: mcq
+      text: "Which device operates primarily at Layer 2 using MAC addresses?"
+      explanation: "Switches forward frames based on MAC addresses at the Data Link layer."
+      choices:
+        - {text: "Switch", correct: true}
+        - {text: "Router"}
+        - {text: "Firewall"}
+        - {text: "DNS server"}
+    - type: true_false
+      text: "UDP performs a three-way handshake before sending data."
+      explanation: "False — that's TCP. UDP is connectionless and just sends."
+      choices:
+        - {text: "True"}
+        - {text: "False", correct: true}
+    - type: fill_in
+      text: "The Layer 3 PDU (unit of data) is called a ______."
+      explanation: "Layer 3 = packet."
+      answers:
+        - "packet"
+        - "packets"
+    - type: mcq
+      text: "Which set of services most typically runs over UDP?"
+      explanation: "DNS, DHCP, and VoIP favour UDP for low overhead/latency."
+      choices:
+        - {text: "DNS, DHCP, VoIP", correct: true}
+        - {text: "HTTP, SSH, SMTP"}
+        - {text: "FTP, IMAP, POP3"}
+        - {text: "TLS, HTTPS, FTPS"}
+    - type: fill_in
+      text: "The three TCP handshake messages in order are SYN, ______, ACK."
+      explanation: "SYN, SYN-ACK, ACK."
+      answers:
+        - "SYN-ACK"
+        - "SYN ACK"
+        - "SYNACK"
+        - "SYN/ACK"

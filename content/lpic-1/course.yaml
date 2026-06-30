@@ -1,0 +1,10 @@
+slug: lpic-1
+name: "LPIC-1 — Linux Administrator"
+icon: "🐧"
+order: 1
+description: |
+  The Linux Professional Institute LPIC-1 certification track. Covers system
+  architecture, installation and package management, GNU & Unix commands, the
+  filesystem, shells and scripting, networking fundamentals, security, and
+  administrative tasks — everything you need to work confidently on the Linux
+  command line as a junior sysadmin / DevOps engineer.

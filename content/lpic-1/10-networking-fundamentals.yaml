@@ -1,0 +1,232 @@
+chapter:
+  title: "Networking Fundamentals (Linux)"
+  slug: networking-fundamentals
+  order: 10
+  summary: "Configure and troubleshoot networking from the Linux command line with the iproute2 tools."
+
+lessons:
+  - title: "Inspect and configure networking"
+    slug: configure-networking
+    order: 1
+    est_minutes: 24
+    summary: "Addresses, routes, DNS resolution, and listening sockets with ip/ss."
+    body: |
+      ## The modern toolkit (iproute2)
+
+      The old `ifconfig`/`route`/`netstat` are deprecated. Use:
+
+      ```bash
+      ip addr            # show interfaces and IP addresses (ip a)
+      ip link            # interfaces up/down state
+      ip route           # the routing table (ip r)
+      ss -tulnp          # listening TCP/UDP sockets + the process
+      ```
+
+      ### Bring an interface up / assign an address (temporary)
+
+      ```bash
+      sudo ip link set eth0 up
+      sudo ip addr add 192.168.1.50/24 dev eth0
+      sudo ip route add default via 192.168.1.1
+      ```
+
+      These don't persist across reboot — persistent config is distro-specific
+      (NetworkManager `nmcli`, `/etc/netplan/*.yaml` on Ubuntu, or
+      `/etc/network/interfaces` on older Debian).
+
+      ## Name resolution
+
+      - `/etc/hosts` — static name→IP entries, checked first.
+      - `/etc/resolv.conf` — the DNS servers (`nameserver 1.1.1.1`).
+      - `/etc/nsswitch.conf` — the *order* (files vs dns).
+
+      ```bash
+      getent hosts example.com    # resolve via the full nsswitch chain
+      dig example.com             # query DNS directly
+      host example.com            # simpler DNS lookup
+      ```
+    deep_dive: |
+      ### Where this config lives — the kernel, not files
+
+      **`ip` talks to the kernel over netlink.** Addresses, links, and routes are
+      kernel state, not files. The old `ifconfig`/`route` tools scraped and poked
+      `/proc`; iproute2's `ip` and `ss` instead use a **netlink** socket — a
+      structured kernel API — which is why they're faster, show things the old
+      tools can't (multiple addresses per interface, policy routing), and apply
+      changes atomically. The **routing table** they edit is the kernel's FIB, and
+      every outgoing packet is matched against it by **longest-prefix**: the most
+      specific route wins, with `default` (0.0.0.0/0) as the catch-all gateway.
+
+      **That's why `ip addr add` doesn't survive a reboot.** You're mutating live
+      kernel state, not writing config. On next boot the kernel starts blank and
+      something in userspace — NetworkManager, netplan, `ifupdown` — must replay
+      the desired setup from its files. The `ip` commands are perfect for testing
+      but vanish unless a persistence layer records them.
+
+      **Name resolution is a userspace library walk.** There's no kernel DNS. When a
+      program calls `getaddrinfo()`, the C library consults `/etc/nsswitch.conf` to
+      learn the *order* of sources, typically `files` (check `/etc/hosts`) then
+      `dns` (query the servers in `/etc/resolv.conf`). `getent hosts` walks that
+      exact chain, whereas `dig` bypasses it to query DNS directly — which is how
+      you tell a `/etc/hosts` override apart from a real DNS answer.
+    cards:
+      - front: "What replaced the deprecated `ifconfig` and `route` commands?"
+        back: "The iproute2 suite: `ip addr`/`ip link` and `ip route` (and `ss` for sockets)."
+      - front: "How do you list all listening sockets with the owning process?"
+        back: "`ss -tulnp` (TCP, UDP, listening, numeric, process)."
+      - front: "Which file lists your DNS servers, and which holds static host entries?"
+        back: "`/etc/resolv.conf` for nameservers; `/etc/hosts` for static name→IP mappings."
+      - cloze: "`ip {{c1::addr}}` shows IP addresses, `ip {{c2::route}}` shows the routing table, and `{{c3::ss}} -tulnp` shows listening sockets."
+    feynman:
+      - "Trace what happens, file by file, when Linux resolves `example.com` to an IP."
+      - "Why don't `ip addr add` changes survive a reboot, and where does persistent config live?"
+    labs:
+      - title: "Network recon on a host"
+        slug: lab-network-recon
+        difficulty: core
+        est_minutes: 20
+        scenario: |
+          You've SSH'd into an unfamiliar server and need its network picture fast.
+        deliverable: |
+          1. Its IP address(es) and interface names.
+          2. Its default gateway.
+          3. Every port it's listening on, with the process.
+          4. Confirm DNS works by resolving a domain two different ways.
+        hints: |
+          - `ip a`, `ip r`, `ss -tulnp`, `getent hosts`, `dig`
+        solution: |
+          ```bash
+          ip -brief a
+          ip route | grep default
+          sudo ss -tulnp
+          getent hosts github.com
+          dig +short github.com
+          ```
+
+  - title: "Troubleshoot connectivity"
+    slug: troubleshoot-connectivity
+    order: 2
+    est_minutes: 20
+    summary: "A layered approach: link, IP, gateway, DNS, service."
+    body: |
+      ## Work up the layers
+
+      When "it doesn't connect," test in order — each step rules out a layer:
+
+      1. **Link/IP** — do I have an address? `ip a`
+      2. **Local gateway** — can I reach the router? `ping <gateway>`
+      3. **Internet (by IP)** — bypass DNS: `ping 1.1.1.1`
+      4. **DNS** — names resolving? `dig example.com` / `ping example.com`
+      5. **Service/port** — is the port open? `ss`, `nc -zv host 443`, `curl -v`
+
+      If `ping 1.1.1.1` works but `ping example.com` fails, it's **DNS**.
+
+      ## Handy tools
+
+      ```bash
+      ping -c4 1.1.1.1            # reachability + latency
+      traceroute example.com     # path hop by hop (mtr is nicer)
+      nc -zv example.com 443     # is the TCP port open?
+      curl -I https://example.com   # HTTP-level check (headers)
+      ```
+    deep_dive: |
+      ### The clever protocol tricks behind the diagnostic tools
+
+      **ping and traceroute both ride ICMP.** `ping` sends an ICMP echo-request and
+      times the echo-reply — simple, except many firewalls drop ICMP, so a failed
+      ping can mean "blocked" rather than "down." `traceroute` is a beautiful hack
+      on the **TTL** field: every router decrements TTL and, when it hits 0, sends
+      back an ICMP *Time Exceeded* naming itself. So traceroute fires packets with
+      TTL=1, 2, 3… and collects each "you died here" reply to map the path hop by
+      hop.
+
+      **The layered checklist works because each tool tests one layer.** `ip a`
+      confirms L3 addressing; reaching the gateway tests the local L2 segment —
+      which silently depends on **ARP** broadcasting "who has this IP?" to learn the
+      next hop's MAC. Pinging `1.1.1.1` tests routing to the internet *without* DNS;
+      if that succeeds but a name fails, the fault is isolated to DNS resolution.
+      `nc`/`curl` then test that the specific TCP port and application actually
+      respond. Each step rules out everything below it.
+
+      **`ss` reads the kernel's socket tables directly.** Like `ip`, it queries the
+      kernel over netlink rather than parsing `/proc/net`, so `ss -tulnp` instantly
+      lists listening sockets and (with privilege) the owning process — letting you
+      confirm a service is actually bound to the port and interface you expect,
+      which is often the real problem when the network itself is fine.
+    cards:
+      - front: "`ping 1.1.1.1` works but `ping example.com` fails. What's broken?"
+        back: "DNS resolution — you have connectivity (IP reachable) but names aren't resolving. Check /etc/resolv.conf and `dig`."
+      - front: "Which command checks whether a specific TCP port on a host is open?"
+        back: "`nc -zv host port` (or `ss`/`curl -v` / `nmap`)."
+      - front: "What does `traceroute` show you?"
+        back: "The path packets take to a destination, hop by hop, with per-hop latency (helps locate where traffic stops)."
+      - cloze: "To check connectivity bypassing DNS, ping an {{c1::IP}} like 1.1.1.1; if that works but names fail, the problem is {{c2::DNS}}."
+    feynman:
+      - "Walk through your layered troubleshooting steps for 'the website won't load'."
+    labs:
+      - title: "Diagnose 'the internet is down'"
+        slug: lab-diagnose-connectivity
+        difficulty: challenge
+        est_minutes: 22
+        scenario: |
+          A user reports they can't reach an internal web app. You have shell on
+          their machine. Pinpoint the layer at fault systematically.
+        deliverable: |
+          Write the ordered commands you'd run and what each result would tell
+          you, for: no IP, gateway unreachable, internet down, DNS broken, and
+          service/port down. Then give the single command that distinguishes a
+          DNS problem from a connectivity problem.
+        hints: |
+          - One layer per step; isolate DNS by pinging an IP vs a name.
+        solution: |
+          ```bash
+          ip a                     # 1. have an IP?
+          ping -c2 $(ip r | awk '/default/{print $3}')   # 2. gateway?
+          ping -c2 1.1.1.1         # 3. internet by IP?
+          dig +short example.com   # 4. DNS?
+          nc -zv appserver 443     # 5. service/port?
+          ```
+          The DNS-vs-connectivity discriminator: `ping 1.1.1.1` (IP) succeeding
+          while `ping example.com` (name) fails ⇒ DNS is the culprit.
+
+quiz:
+  title: "Networking Fundamentals — chapter exam"
+  slug: lpic1-networking-exam
+  scope: chapter
+  description: "Linux networking config and troubleshooting."
+  questions:
+    - type: command
+      text: "Show the routing table using the modern iproute2 command."
+      explanation: "`ip route` (or `ip r`)."
+      answers:
+        - "ip route"
+        - "ip r"
+        - {value: "ip route show", match: exact}
+    - type: mcq
+      text: "Which file specifies the DNS nameservers the system uses?"
+      explanation: "`/etc/resolv.conf` lists `nameserver` entries."
+      choices:
+        - {text: "/etc/resolv.conf", correct: true}
+        - {text: "/etc/hosts"}
+        - {text: "/etc/fstab"}
+        - {text: "/etc/hostname"}
+    - type: mcq
+      text: "ping to 1.1.1.1 succeeds but ping to a hostname fails. Most likely cause?"
+      explanation: "Connectivity is fine; name resolution (DNS) is broken."
+      choices:
+        - {text: "DNS resolution is broken", correct: true}
+        - {text: "The NIC is down"}
+        - {text: "No default gateway"}
+        - {text: "The cable is unplugged"}
+    - type: command
+      text: "List all listening TCP and UDP sockets with the owning process (numeric)."
+      explanation: "`ss -tulnp`."
+      answers:
+        - {value: "(sudo )?ss -tulnp", match: regex}
+        - {value: "(sudo )?ss -tulpn", match: regex}
+    - type: true_false
+      text: "Addresses set with `ip addr add` persist across a reboot."
+      explanation: "False — they're temporary; persistent config lives in NetworkManager/netplan/interfaces."
+      choices:
+        - {text: "True"}
+        - {text: "False", correct: true}

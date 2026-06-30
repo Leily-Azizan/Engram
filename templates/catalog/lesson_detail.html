@@ -1,0 +1,112 @@
+{% extends 'base.html' %}
+{% load content_extras %}
+{% block title %}{{ lesson.title }} · Engram{% endblock %}
+{% block topbar %}{{ lesson.chapter.course.name }}{% endblock %}
+{% block content %}
+<div class="crumbs">
+  <a href="{% url 'course_list' %}">Courses</a> /
+  <a href="{{ lesson.chapter.course.get_absolute_url }}">{{ lesson.chapter.course.name }}</a> /
+  <a href="{{ lesson.chapter.get_absolute_url }}">{{ lesson.chapter.title }}</a> /
+  {{ lesson.title }}
+</div>
+
+<div style="display:flex; justify-content:space-between; align-items:flex-start; gap:16px; flex-wrap:wrap;">
+  <div>
+    <h1>{{ lesson.title }}</h1>
+    {% if lesson.summary %}<p class="subtitle">{{ lesson.summary }}</p>{% endif %}
+    <div class="muted" style="font-size:13px;">⏱️ ~{{ lesson.est_minutes }} min</div>
+  </div>
+  <form method="post" action="{% url 'progress_update' %}">
+    {% csrf_token %}
+    <input type="hidden" name="lesson_id" value="{{ lesson.id }}">
+    <div class="btn-row">
+      <button class="btn {% if progress.status == 'reading' %}primary{% endif %} sm" name="status" value="reading">📖 Reading</button>
+      <button class="btn {% if progress.status == 'learned' %}good{% endif %} sm" name="status" value="learned">✅ Learned</button>
+    </div>
+  </form>
+</div>
+
+<div class="card">
+  <div class="prose">{{ lesson.body_html|safe }}</div>
+</div>
+
+{% if lesson.deep_dive_md %}
+<div class="card" style="border-left:4px solid var(--brand);">
+  <details>
+    <summary style="cursor:pointer; font-weight:700; color:var(--brand); font-size:16px;">🔬 Under the hood — how this works at the OS level</summary>
+    <div class="prose" style="margin-top:14px;">{{ lesson.deep_dive_html|safe }}</div>
+  </details>
+</div>
+{% endif %}
+
+{% if examples %}
+<div class="card">
+  <h3>💡 Worked examples</h3>
+  {% for ex in examples %}
+    <h4>{{ ex.title }}</h4>
+    <div class="prose"><pre><code>{{ ex.code }}</code></pre></div>
+    {% if ex.explanation %}<div class="prose">{{ ex.explanation_html|safe }}</div>{% endif %}
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if flashcards %}
+<div class="card">
+  <h3>🔁 Recall cards for this lesson <span class="muted" style="font-size:13px;">({{ flashcards|length }})</span></h3>
+  <p class="muted">Test yourself before moving on. Full scheduling lives in <a href="{% url 'review' %}">Review</a>.</p>
+  {% for fc in flashcards %}
+    <details style="border-bottom:1px solid var(--line); padding:10px 0;">
+      <summary style="cursor:pointer; font-weight:600;">{{ fc.prompt_html|safe }}</summary>
+      <div class="prose" style="margin-top:8px;">{{ fc.answer_html|safe }}</div>
+    </details>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if feynman_prompts %}
+<div class="card">
+  <h3>🗣️ Explain it back (Feynman)</h3>
+  <p class="muted">If you can't explain it simply, you don't fully get it yet.</p>
+  <ul class="list">
+    {% for fp in feynman_prompts %}
+      <li><span>{{ fp.prompt }}</span><a class="btn sm" href="{% url 'feynman' %}?prompt={{ fp.id }}">Explain</a></li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+{% if labs %}
+<div class="card">
+  <h3>🛠️ Labs</h3>
+  <ul class="list">
+    {% for l in labs %}<li><a href="{{ l.get_absolute_url }}">{{ l.title }}</a><span class="tag-diff {{ l.difficulty }}">{{ l.get_difficulty_display }}</span></li>{% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+{% if quizzes %}
+<div class="card">
+  <h3>📝 Chapter exams</h3>
+  <ul class="list">
+    {% for q in quizzes %}<li><a href="{{ q.get_absolute_url }}">{{ q.title }}</a><span class="meta">{{ q.question_count }} Q</span></li>{% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+<div class="card" id="notes">
+  <h3>📒 My notes</h3>
+  <form method="post" action="{% url 'note_save' %}">
+    {% csrf_token %}
+    <input type="hidden" name="lesson_id" value="{{ lesson.id }}">
+    <textarea name="body_md" placeholder="What clicked? A gotcha you hit? A command worth remembering?">{{ note.body_md|default:'' }}</textarea>
+    <div class="hint">Markdown supported. Writing it in your own words is itself active recall.</div>
+    <div class="btn-row" style="margin-top:10px;"><button class="btn primary" type="submit">Save note</button></div>
+  </form>
+  {% if note.body_md %}<div class="prose" style="margin-top:14px;">{{ note.body_html|safe }}</div>{% endif %}
+</div>
+
+<div class="btn-row" style="justify-content:space-between; margin-top:8px;">
+  {% if prev_lesson %}<a class="btn" href="{{ prev_lesson.get_absolute_url }}">← {{ prev_lesson.title|truncatewords:5 }}</a>{% else %}<span></span>{% endif %}
+  {% if next_lesson %}<a class="btn primary" href="{{ next_lesson.get_absolute_url }}">{{ next_lesson.title|truncatewords:5 }} →</a>{% endif %}
+</div>
+{% endblock %}

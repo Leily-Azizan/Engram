@@ -1,0 +1,90 @@
+{% extends 'base.html' %}
+{% block title %}Search · Engram{% endblock %}
+{% block topbar %}Search{% endblock %}
+{% block content %}
+<h1>🔎 Search</h1>
+
+<form method="get" action="{% url 'search' %}" class="form-row" style="max-width:520px;">
+  {% if course %}<input type="hidden" name="course" value="{{ course.slug }}">{% endif %}
+  <input type="text" name="q" value="{{ query }}" placeholder="Search {% if course %}{{ course.name }}{% else %}lessons, labs, cards, notes{% endif %}…" autofocus>
+</form>
+
+{% if course %}
+  <p class="subtitle">Searching within <strong>{{ course.icon }} {{ course.name }}</strong> ·
+    <a href="{% url 'search' %}?q={{ query|urlencode }}">search all courses</a></p>
+{% endif %}
+
+{% if query %}
+  <p class="subtitle">{{ total }} result{{ total|pluralize }} for “{{ query }}”.</p>{% endif %}
+{% if query %}{# results below #}
+
+  {% if lessons %}
+    <div class="card">
+      <h3>📖 Lessons</h3>
+      <ul class="list">
+        {% for l in lessons %}
+          <li>
+            <a href="{{ l.get_absolute_url }}">{{ l.title }}</a>
+            <span class="meta">{{ l.chapter.course.name }} · {{ l.chapter.title }}</span>
+          </li>
+        {% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+
+  {% if chapters %}
+    <div class="card">
+      <h3>🗂️ Chapters</h3>
+      <ul class="list">
+        {% for c in chapters %}
+          <li><a href="{{ c.get_absolute_url }}">{{ c.title }}</a><span class="meta">{{ c.course.name }}</span></li>
+        {% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+
+  {% if labs %}
+    <div class="card">
+      <h3>🛠️ Labs</h3>
+      <ul class="list">
+        {% for lab in labs %}
+          <li><a href="{{ lab.get_absolute_url }}">{{ lab.title }}</a>
+            <span class="tag-diff {{ lab.difficulty }}">{{ lab.get_difficulty_display }}</span></li>
+        {% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+
+  {% if cards %}
+    <div class="card">
+      <h3>🔁 Flashcards</h3>
+      <ul class="list">
+        {% for fc in cards %}
+          <li>
+            <a href="{{ fc.lesson.get_absolute_url }}">{{ fc.front|default:fc.cloze_text|truncatewords:14 }}</a>
+            <span class="meta">{{ fc.lesson.title }}</span>
+          </li>
+        {% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+
+  {% if notes %}
+    <div class="card">
+      <h3>📒 My notes</h3>
+      <ul class="list">
+        {% for n in notes %}
+          <li><a href="{{ n.target_url }}">{{ n.body_md|truncatewords:14 }}</a>
+            <span class="meta">{{ n.target_label }}</span></li>
+        {% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+
+  {% if not total %}
+    <div class="empty">No matches. Try a different word (e.g. a command like <code>chmod</code> or a concept like <code>subnetting</code>).</div>
+  {% endif %}
+{% else %}
+  <div class="empty">Type a word above — a command (<code>tar</code>, <code>ldd</code>), a concept (<code>inode</code>, <code>handshake</code>), or anything from your notes.</div>
+{% endif %}
+{% endblock %}

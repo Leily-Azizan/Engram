@@ -1,0 +1,258 @@
+chapter:
+  title: "Switching and Routing"
+  slug: switching-and-routing
+  order: 4
+  summary: "How switches move frames within a LAN, how VLANs segment it, and how routers move packets between networks."
+
+lessons:
+  - title: "Switching, MAC tables, and VLANs"
+    slug: switching-vlans
+    order: 1
+    est_minutes: 22
+    summary: "Layer-2 forwarding, the MAC address table, broadcast domains, and VLAN segmentation."
+    body: |
+      ## How a switch thinks
+
+      A switch operates at **Layer 2** and forwards **frames** using **MAC
+      addresses**. It learns by watching source MACs and builds a **MAC address
+      table** (CAM table) mapping MAC → port.
+
+      - **Known unicast** → sent only out the correct port.
+      - **Unknown unicast / broadcast** → flooded out all ports (except the one
+        it came in on).
+
+      All ports on a switch are one **broadcast domain** by default — a broadcast
+      reaches everyone. That doesn't scale, which is why we have VLANs.
+
+      ## VLANs — segmenting a switch
+
+      A **VLAN** splits one physical switch into multiple logical LANs, each its
+      own broadcast domain. Traffic between VLANs must go through a **router** (or
+      L3 switch) — "router on a stick."
+
+      - **Access port** — belongs to one VLAN (a normal device).
+      - **Trunk port** — carries many VLANs between switches, tagging frames with
+        **802.1Q** VLAN IDs.
+
+      Benefits: isolation (Guests can't see Servers), smaller broadcast domains,
+      and security boundaries — without running separate cables.
+    deep_dive: |
+      ### How a switch learns, and what a VLAN tag does to a frame
+
+      A switch boots knowing nothing. It builds its **MAC address table** by
+      **source learning**: every frame that arrives records "MAC X is reachable via
+      port P" (the source MAC + ingress port). To *forward*, it looks up the
+      **destination** MAC:
+      - **hit** → send only out that one port (unicast, efficient).
+      - **miss / broadcast / multicast** → **flood** out every port except the
+        ingress one. The reply then teaches the switch where the destination lives,
+        so future frames are unicast. Entries age out after a timeout so the table
+        self-heals when devices move.
+
+      This is pure **Layer 2** — the switch never looks at IP. Everything reachable
+      without crossing a router is one **broadcast domain**: an ARP request ("who
+      has 192.168.1.1?") floods to everyone in it. That's fine for a small LAN and
+      a scaling problem for a big one — which is what VLANs fix.
+
+      **A VLAN is a tag, literally.** 802.1Q inserts a 4-byte tag into the Ethernet
+      frame carrying a 12-bit **VLAN ID** (1–4094). The switch treats each VLAN as a
+      *separate* MAC table and broadcast domain, even on the same physical hardware.
+      - **Access ports** belong to one VLAN and carry **untagged** frames (the
+        endpoint doesn't know it's in a VLAN); the switch adds/removes the tag.
+      - **Trunk ports** carry **many** VLANs between switches and keep the tag on so
+        the other switch knows which VLAN each frame belongs to.
+
+      Because each VLAN is its own broadcast domain, traffic between VLANs **must be
+      routed at Layer 3** (a router or L3 switch with an interface/SVI in each
+      VLAN). So "VLANs for isolation" works precisely because a frame can't leave
+      its VLAN without a routing decision you control with ACLs — the same
+      segmentation idea the Network Security chapter builds on.
+    cards:
+      - front: "What does a switch use to decide where to forward a frame?"
+        back: "The destination MAC address, looked up in its MAC address (CAM) table that maps MAC → port."
+      - front: "What does a switch do with a broadcast or unknown-unicast frame?"
+        back: "Floods it out every port except the one it arrived on."
+      - front: "What is a VLAN and why use one?"
+        back: "A logical segmentation of a switch into separate broadcast domains — for isolation, security, and smaller broadcast domains without extra cabling."
+      - cloze: "An {{c1::access}} port belongs to a single VLAN, while a {{c2::trunk}} port carries multiple VLANs and tags frames with {{c3::802.1Q}}."
+      - cloze: "Devices in different VLANs must communicate through a {{c1::router}} (or L3 switch)."
+    feynman:
+      - "Explain how a switch 'learns' where devices are."
+      - "Why does putting Guests and Servers on separate VLANs improve security?"
+    labs:
+      - title: "Design a VLAN layout"
+        slug: lab-vlan-design
+        difficulty: core
+        est_minutes: 20
+        scenario: |
+          A small office has one managed switch and three groups that must not see
+          each other's broadcast traffic: Staff, Guests, and Servers. They share
+          uplinks to a second switch.
+        deliverable: |
+          1. Assign a VLAN ID to each group.
+          2. State which switch ports are access vs trunk and why.
+          3. Explain how Staff would reach a Server (different VLANs).
+          4. Explain what tagging standard the trunk uses.
+        hints: |
+          - Access ports for end devices; trunk between switches.
+          - Inter-VLAN routing needs a router/L3 switch.
+        solution: |
+          - VLAN 10 = Staff, VLAN 20 = Guests, VLAN 30 = Servers.
+          - End-device ports = **access** (one VLAN each). The link between the
+            two switches = **trunk** carrying VLANs 10/20/30, tagged with
+            **802.1Q**.
+          - Staff→Server crosses VLANs, so it routes through a **router / L3
+            switch** that has an interface in both VLANs and an ACL allowing it.
+
+  - title: "Routing between networks"
+    slug: routing
+    order: 2
+    est_minutes: 22
+    summary: "Routing tables, default gateways, static vs dynamic routing, and NAT."
+    body: |
+      ## Routers move packets between networks
+
+      A **router** works at **Layer 3**, forwarding **packets** by **IP** using a
+      **routing table**. Each entry says "to reach network X, send via next-hop Y
+      out interface Z." The **default route** (`0.0.0.0/0`) is "everything else →
+      the gateway."
+
+      ```bash
+      ip route        # Linux routing table
+      # default via 192.168.1.1 dev eth0      <- the gateway
+      # 192.168.1.0/24 dev eth0               <- directly connected
+      ```
+
+      Routers prefer the **most specific** (longest-prefix) match.
+
+      ## Static vs dynamic
+
+      - **Static** routes are configured by hand — simple, predictable, but don't
+        adapt to failures. Fine for small/edge networks.
+      - **Dynamic** routing protocols (**OSPF**, **BGP**, RIP, EIGRP) let routers
+        share reachability automatically. BGP runs the internet between ISPs;
+        OSPF is common inside an organisation.
+
+      ## NAT
+
+      **NAT** (Network Address Translation) rewrites private source IPs to a
+      single public IP so a whole LAN can share one address — the reason
+      `192.168.x.x` works at home. **PAT** (port address translation) tracks
+      connections by port so replies return to the right host.
+    deep_dive: |
+      ### What a router does to every packet, and longest-prefix match
+
+      A router is a **Layer 3** forwarding engine. For each incoming packet it:
+      1. checks the destination **IP** against its **routing table**,
+      2. picks the **most specific matching route** (longest prefix),
+      3. decrements the **TTL** (and drops the packet if it hits 0 — this is what
+         `traceroute` exploits),
+      4. **rewrites the Layer 2 header** — new source/destination MAC for the next
+         hop — while leaving the IP header's addresses unchanged,
+      5. sends it out the chosen interface toward the next-hop router or the host.
+
+      The packet thus keeps the **same src/dst IP end-to-end** but gets a **fresh
+      MAC pair on every link** — which is the cleanest demonstration of the OSI
+      layering from chapter 1: L3 identity is stable, L2 is hop-local.
+
+      **Longest-prefix match** is the key rule. Given routes `0.0.0.0/0` (default),
+      `10.0.0.0/8`, and `10.1.2.0/24`, a packet to `10.1.2.5` matches all three —
+      the router uses the **/24** because it's the most specific (the most leading
+      bits in common). The default route `0.0.0.0/0` matches *everything* with zero
+      specificity, so it's the fallback when nothing better matches: "send the rest
+      to the gateway."
+
+      **Static vs dynamic** is about who fills that table. Static routes are typed
+      by an admin — predictable but blind to failures. Dynamic protocols let routers
+      **exchange reachability** and recompute automatically: **OSPF** floods
+      link-state info within an organisation and runs Dijkstra to pick shortest
+      paths; **BGP** exchanges routes *between* autonomous systems and literally
+      runs the internet, choosing paths by policy. **NAT** (chapter 2) is a special
+      forwarding case where the router also rewrites L3 addresses/ports. So routing
+      is "match the longest prefix, rewrite L2, forward, repeat" — done a few
+      hundred million times a second.
+    cards:
+      - front: "What is the default route and how is it written?"
+        back: "`0.0.0.0/0` — the catch-all 'send everything not matched elsewhere to the gateway'."
+      - front: "When two routes match a destination, which wins?"
+        back: "The most specific one — longest prefix match (e.g. /24 beats /0)."
+      - front: "Static vs dynamic routing — the trade-off?"
+        back: "Static = manual, simple, predictable but doesn't adapt to failures. Dynamic (OSPF/BGP) auto-shares routes and reroutes around failures, at more complexity."
+      - cloze: "{{c1::NAT}} lets many private hosts share one public IP; {{c2::BGP}} is the routing protocol that runs the internet between ISPs."
+    feynman:
+      - "Explain longest-prefix match with an example of two overlapping routes."
+      - "Describe how NAT lets your home devices all reach the internet through one public IP."
+    labs:
+      - title: "Read and reason about a routing table"
+        slug: lab-routing-table
+        difficulty: challenge
+        est_minutes: 20
+        scenario: |
+          You're handed this routing table on a Linux gateway:
+          ```
+          default via 10.0.0.1 dev eth0
+          10.0.0.0/24 dev eth0
+          192.168.50.0/24 via 10.0.0.2 dev eth0
+          ```
+        deliverable: |
+          1. Where does a packet to 10.0.0.50 go?
+          2. Where does a packet to 192.168.50.7 go?
+          3. Where does a packet to 8.8.8.8 go?
+          4. Explain which rule wins for 192.168.50.7 and why.
+        hints: |
+          - Match the most specific route first; fall back to default.
+        solution: |
+          1. 10.0.0.50 → directly connected on `eth0` (10.0.0.0/24).
+          2. 192.168.50.7 → next-hop **10.0.0.2** (matches 192.168.50.0/24).
+          3. 8.8.8.8 → no specific match → **default** via 10.0.0.1.
+          4. 192.168.50.7 matches both the /24 and the default /0; the **/24 is
+             more specific (longest prefix)**, so it wins.
+
+quiz:
+  title: "Switching & Routing — chapter exam"
+  slug: netplus-switching-routing-exam
+  scope: chapter
+  description: "L2 switching, VLANs, and L3 routing/NAT."
+  questions:
+    - type: mcq
+      text: "A switch forwards frames based on what?"
+      explanation: "Destination MAC address via its CAM/MAC table (Layer 2)."
+      choices:
+        - {text: "Destination MAC address", correct: true}
+        - {text: "Destination IP address"}
+        - {text: "Port number"}
+        - {text: "Hostname"}
+    - type: mcq
+      text: "Devices on different VLANs communicate through what?"
+      explanation: "Inter-VLAN traffic must be routed (router or L3 switch)."
+      choices:
+        - {text: "A router or Layer-3 switch", correct: true}
+        - {text: "A hub"}
+        - {text: "An access port"}
+        - {text: "The same broadcast domain"}
+    - type: fill_in
+      text: "The default route is written in CIDR as ________."
+      explanation: "0.0.0.0/0 matches everything as a last resort."
+      answers: ["0.0.0.0/0"]
+    - type: mcq
+      text: "When multiple routes match a destination, the router chooses the one that is..."
+      explanation: "Longest-prefix (most specific) match wins."
+      choices:
+        - {text: "Most specific (longest prefix)", correct: true}
+        - {text: "Least specific"}
+        - {text: "Listed first"}
+        - {text: "Added most recently"}
+    - type: true_false
+      text: "NAT lets many private hosts share a single public IP address."
+      explanation: "True — that's its core purpose."
+      choices:
+        - {text: "True", correct: true}
+        - {text: "False"}
+    - type: mcq
+      text: "Which tagging standard is used on trunk ports to identify VLANs?"
+      explanation: "IEEE 802.1Q tags Ethernet frames with a VLAN ID."
+      choices:
+        - {text: "802.1Q", correct: true}
+        - {text: "802.11"}
+        - {text: "802.3"}
+        - {text: "802.1X"}

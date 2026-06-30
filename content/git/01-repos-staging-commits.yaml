@@ -1,0 +1,173 @@
+chapter:
+  title: "Repositories, Staging and Commits"
+  slug: repos-staging-commits
+  order: 1
+  summary: "Start tracking code, understand the staging area, and see Git's content-addressed object model."
+
+lessons:
+  - title: "Repos, the staging area, and commits"
+    slug: staging-and-commits
+    order: 1
+    est_minutes: 22
+    summary: "The three areas every Git command moves data between, and the everyday workflow."
+    body: |
+      ## The three areas
+
+      Git has **three** places your files exist, and almost every command moves
+      changes between them:
+
+      ```
+      Working directory  ──git add──►  Staging area (index)  ──git commit──►  Repository (.git)
+       (your edits)                     (the next snapshot)                    (permanent history)
+      ```
+
+      ## The everyday loop
+
+      ```bash
+      git init                 # create a repo (.git/ appears)
+      git status               # what's changed / staged
+      git add file.py          # stage a file (or `git add .` for all)
+      git commit -m "message"  # snapshot the staged changes
+      git log --oneline        # history
+      git diff                 # unstaged changes
+      git diff --staged        # staged-but-not-committed changes
+      ```
+
+      ## Why a staging area?
+
+      The index lets you **craft a commit deliberately** — stage only the related
+      changes, leave the rest. You can edit ten files but commit just the two that
+      belong together, keeping history clean.
+
+      ```bash
+      git add -p               # interactively stage specific hunks
+      ```
+
+      ## Telling Git what to ignore
+
+      A `.gitignore` keeps build artifacts, secrets, and dependencies out of the
+      repo:
+
+      ```
+      __pycache__/
+      .env
+      node_modules/
+      *.log
+      ```
+    deep_dive: |
+      ### Git's object model: it's a content-addressed key–value store
+
+      Under `.git/`, Git is essentially a tiny database mapping a **SHA hash →
+      object**. Everything you commit becomes one of three object types, each named
+      by the SHA of its own contents (content-addressing, like Docker layers):
+
+      - **blob** — the *contents* of a file (no name, no path — just bytes).
+      - **tree** — a directory listing: names → blob/tree hashes + modes. A tree is
+        a snapshot of a folder.
+      - **commit** — a pointer to one top **tree** (the whole project snapshot) +
+        parent commit hash(es) + author/committer + message.
+
+      So a commit doesn't store a *diff* — it points to a complete tree snapshot.
+      Diffs are *computed* on demand by comparing two trees. Identical file
+      contents anywhere in history are stored **once** (same blob hash), which is
+      how Git stays small despite snapshotting everything.
+
+      **What `git add` really does:** it writes a blob object for the file's current
+      contents into the database and records that blob's hash in the **index** (a
+      binary file, `.git/index`, listing path → blob hash + metadata). The index is
+      literally "the tree your next commit will have." That's why staging is a
+      distinct step: you're building the next snapshot incrementally.
+
+      **What `git commit` really does:** it turns the index into a **tree** object,
+      creates a **commit** object pointing at that tree and at the current commit as
+      parent, then moves the current branch to the new commit. Three of the "three
+      trees" mental model — **HEAD** (last commit's tree), **index** (staged tree),
+      **working dir** (your files) — and most commands (`status`, `diff`, `reset`,
+      `checkout`) are just comparing or syncing these three.
+
+      **Why SHAs matter:** because each commit's hash includes its tree *and* its
+      parent's hash, the whole history is a tamper-evident chain — change anything
+      in the past and every later hash changes. This is also why a commit's identity
+      is its hash, and why rewriting history (rebase, amend) necessarily produces
+      *new* commit objects with new hashes (chapter 4).
+    cards:
+      - front: "Name Git's three areas and the command that moves changes between each."
+        back: "Working directory →(git add)→ staging area/index →(git commit)→ repository (.git). status/diff compare them."
+      - front: "What is the staging area (index) for?"
+        back: "It's the snapshot your next commit will be — letting you deliberately compose a commit from specific changes (even specific hunks via `git add -p`)."
+      - front: "What are Git's three core object types?"
+        back: "blob (file contents), tree (a directory: names → blob/tree hashes), and commit (points to one tree + parent(s) + author + message). All named by the SHA of their contents."
+      - front: "Does a commit store a diff or a snapshot?"
+        back: "A snapshot — it points to a complete tree of the whole project. Diffs are computed by comparing two trees. Identical contents share one blob."
+      - cloze: "`git add` writes a {{c1::blob}} and records it in the {{c2::index}}; `git commit` turns the index into a {{c3::tree}} plus a commit object."
+      - cloze: "Git objects are named by the {{c1::SHA}} hash of their contents — the same content-addressing idea as Docker layers."
+    feynman:
+      - "Explain why Git can snapshot your whole project on every commit without exploding in size."
+      - "Walk through exactly what `git add` then `git commit` create in the object database."
+    labs:
+      - title: "Peek inside .git"
+        slug: lab-inside-git
+        difficulty: core
+        est_minutes: 20
+        scenario: |
+          You'll prove Git is a content-addressed object store, not a pile of diffs.
+        deliverable: |
+          1. `git init` a fresh repo, add and commit a file.
+          2. Use `git log --oneline` to get the commit hash.
+          3. Use `git cat-file -p <hash>` to view the commit → its tree → a blob.
+          4. Explain what each object you saw is.
+        hints: |
+          - `git cat-file -t <hash>` shows the type; `-p` pretty-prints it.
+          - commit → tree → blob.
+        solution: |
+          ```bash
+          git init demo && cd demo
+          echo "hello" > a.txt
+          git add a.txt && git commit -m "first"
+          c=$(git rev-parse HEAD)
+          git cat-file -p $c          # shows 'tree <hash>' + author + message
+          t=$(git cat-file -p $c | awk '/^tree/{print $2}')
+          git cat-file -p $t          # lists 'blob <hash> a.txt'
+          git cat-file -p $(git rev-parse HEAD:a.txt)   # prints 'hello'
+          ```
+          The commit points to a tree; the tree lists the blob; the blob is the
+          file's contents — content-addressed by SHA.
+
+quiz:
+  title: "Repos, Staging & Commits — chapter exam"
+  slug: git-staging-commits-exam
+  scope: chapter
+  description: "The three areas and Git's object model."
+  questions:
+    - type: command
+      text: "Stage the file app.py for the next commit."
+      explanation: "`git add app.py` records its blob in the index."
+      answers:
+        - {value: "git add app.py", match: exact}
+    - type: mcq
+      text: "What sits between the working directory and the repository?"
+      explanation: "The staging area (index) holds the next commit's snapshot."
+      choices:
+        - {text: "The staging area (index)", correct: true}
+        - {text: "The reflog"}
+        - {text: "The remote"}
+        - {text: "The stash"}
+    - type: mcq
+      text: "A Git commit points to what?"
+      explanation: "A commit references a full tree snapshot plus parent(s), author, and message."
+      choices:
+        - {text: "A full tree snapshot + parent commit(s)", correct: true}
+        - {text: "Only a diff from the previous commit"}
+        - {text: "The staging area"}
+        - {text: "A branch name"}
+    - type: true_false
+      text: "Two identical files in a repo are stored as two separate blobs."
+      explanation: "False — identical contents hash to the same blob and are stored once."
+      choices:
+        - {text: "True"}
+        - {text: "False", correct: true}
+    - type: command
+      text: "Show a concise one-line-per-commit history."
+      explanation: "`git log --oneline`."
+      answers:
+        - {value: "git log --oneline", match: exact}

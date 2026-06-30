@@ -1,0 +1,268 @@
+chapter:
+  title: "Network Services: DNS, DHCP, NTP"
+  slug: network-services
+  order: 5
+  summary: "The infrastructure services that make networks usable: name resolution, automatic addressing, and time."
+
+lessons:
+  - title: "DNS — the internet's phone book"
+    slug: dns
+    order: 1
+    est_minutes: 24
+    summary: "How names resolve, the common record types, and the resolution chain."
+    body: |
+      ## What DNS does
+
+      DNS translates **names** (`example.com`) into **IP addresses** so humans
+      don't memorise numbers. Resolution walks a hierarchy:
+
+      ```
+      stub resolver → recursive resolver → root → TLD (.com) → authoritative
+      ```
+
+      The recursive resolver does the legwork and **caches** answers for the
+      record's **TTL** (time to live).
+
+      ## Record types you must know
+
+      | Record | Maps... |
+      |--------|---------|
+      | A | name → IPv4 address |
+      | AAAA | name → IPv6 address |
+      | CNAME | name → another name (alias) |
+      | MX | domain → mail server (with priority) |
+      | NS | domain → its authoritative name servers |
+      | TXT | arbitrary text (SPF, domain verification) |
+      | PTR | IP → name (reverse lookup) |
+
+      ## Querying DNS
+
+      ```bash
+      dig example.com              # full answer
+      dig +short example.com       # just the IP
+      dig MX example.com           # mail records
+      dig +short -x 1.1.1.1        # reverse (PTR)
+      nslookup example.com         # interactive alternative
+      ```
+
+      DNS uses **UDP/53** for normal queries (fast) and **TCP/53** for large
+      responses and zone transfers.
+    deep_dive: |
+      ### Walking the hierarchy (and why caching matters)
+
+      DNS is a distributed database keyed by name. A full **recursive resolution**
+      for `www.example.com` walks down the tree, because no single server knows
+      everything:
+
+      1. Your **stub resolver** asks the configured **recursive resolver**.
+      2. The resolver asks a **root** server → "I don't know example.com, but here
+         are the **.com** servers" (a referral).
+      3. It asks a **.com** TLD server → "ask example.com's **authoritative**
+         servers" (another referral, via NS records + glue).
+      4. It asks the **authoritative** server → the actual **A** record.
+
+      Each referral step is "iterative"; the resolver doing all of it on your behalf
+      is what makes it "recursive." Every answer carries a **TTL** and is **cached**,
+      so the next lookup skips most of the walk. That caching is why DNS scales to
+      the whole internet — the root servers aren't touched on a cache hit.
+
+      **Why UDP first.** A query+answer usually fits one small UDP datagram — no
+      handshake, minimal latency. If the response is too big (e.g. DNSSEC) the
+      server sets the **truncated (TC) flag** and the resolver **retries over
+      TCP/53**. **Zone transfers** (AXFR, replicating a whole zone between servers)
+      always use TCP for reliability.
+
+      **"Propagation delay" is just TTL expiry:** after you change a record, old
+      values live in caches until their TTL runs out — which is why you lower TTLs
+      *before* a planned migration.
+    cards:
+      - front: "What does an A record map, and what does AAAA map?"
+        back: "A = name → IPv4 address; AAAA = name → IPv6 address."
+      - front: "What is a CNAME record?"
+        back: "An alias: it maps one name to *another name* (which is then resolved). Can't coexist with other records at the same name."
+      - front: "Which record type directs email for a domain, and what extra value does it carry?"
+        back: "MX (mail exchanger), with a priority/preference number — lower is preferred."
+      - front: "What is a DNS record's TTL?"
+        back: "Time To Live — how long resolvers may cache the answer before re-querying."
+      - cloze: "DNS normally uses {{c1::UDP}} port {{c2::53}}, switching to TCP for large responses and zone transfers."
+      - cloze: "A {{c1::PTR}} record does reverse resolution (IP → name); query it with `dig -x <ip>`."
+    feynman:
+      - "Walk through what happens from typing example.com to getting its IP, naming each resolver in the chain."
+      - "Explain why TTL is a trade-off between freshness and load."
+    labs:
+      - title: "Investigate a domain's DNS"
+        slug: lab-dns-recon
+        difficulty: core
+        est_minutes: 20
+        scenario: |
+          Before migrating a website you must document a domain's current DNS so
+          nothing breaks.
+        deliverable: |
+          For a domain of your choice, find and record:
+          1. Its A (IPv4) record.
+          2. Its mail servers (MX) and their priorities.
+          3. Its authoritative name servers (NS).
+          4. The reverse (PTR) name for one of its IPs.
+          Give the exact `dig` command for each.
+        hints: |
+          - `dig +short`, `dig MX`, `dig NS`, `dig -x`
+        solution: |
+          ```bash
+          dig +short example.com A
+          dig +short example.com MX
+          dig +short example.com NS
+          dig +short -x $(dig +short example.com | head -1)
+          ```
+
+  - title: "DHCP and NTP"
+    slug: dhcp-ntp
+    order: 2
+    est_minutes: 18
+    summary: "Automatic IP configuration via DHCP and time sync via NTP."
+    body: |
+      ## DHCP — automatic addressing
+
+      **DHCP** hands clients their IP config automatically. The handshake is
+      **DORA**:
+
+      ```
+      Discover  (client broadcasts "anyone there?")
+      Offer     (server offers an address)
+      Request   (client asks for that offer)
+      Acknowledge (server confirms the lease)
+      ```
+
+      A DHCP lease typically provides: **IP address + subnet mask**, **default
+      gateway**, **DNS servers**, and a **lease time**. DHCP runs over **UDP**
+      (server 67, client 68). If DHCP fails, clients self-assign **APIPA**
+      (169.254.x.x) and can't reach beyond the local link.
+
+      ## NTP — keeping clocks correct
+
+      **NTP** synchronises clocks over the network, organised in **strata**
+      (stratum 0 = reference clock like GPS; stratum 1 = directly attached;
+      higher = further away). Correct time is essential for logs, TLS
+      certificates, and authentication (Kerberos).
+
+      ```bash
+      timedatectl                 # is NTP active?
+      chronyc sources             # peers/strata (chrony)
+      ```
+    deep_dive: |
+      ### Why DHCP starts with a broadcast, and what NTP is really correcting
+
+      **The chicken-and-egg DHCP solves:** a fresh client has **no IP**, so it
+      can't address a server directly. DORA works around that with broadcast:
+      - **Discover** — the client sends a broadcast (`255.255.255.255`, from source
+        `0.0.0.0`) shouting "any DHCP server out there?" Every host on the L2
+        broadcast domain (the VLAN, from chapter 4) hears it.
+      - **Offer** — server(s) reply offering a lease (IP, mask, gateway, DNS, lease
+        time).
+      - **Request** — the client broadcasts which offer it's accepting (so other
+        servers know their offer was declined).
+      - **Acknowledge** — the chosen server confirms; the client configures itself.
+
+      It runs over **UDP** (server 67, client 68) because there's no connection to
+      set up and broadcast is connectionless by nature. The lease is **time-bound**;
+      the client renews at ~50% of the lease (unicast now that it has an address).
+      If no server answers, the client falls back to **APIPA** `169.254.x.x` —
+      link-local only, the classic "got an IP but no internet" symptom. Because
+      Discover is a broadcast (routers don't forward broadcasts), DHCP servers on
+      another subnet need a **DHCP relay/helper** to forward requests — a detail
+      that explains a lot of "why isn't this VLAN getting addresses?" tickets.
+
+      **NTP corrects clock drift, hierarchically.** Every computer's crystal
+      oscillator drifts (seconds/day). NTP disciplines the local clock toward
+      reference time, organised in **strata**: stratum 0 = a reference source
+      (GPS/atomic), stratum 1 = servers directly attached to one, and each layer out
+      is one stratum higher. The client measures **round-trip delay and offset** to
+      its servers and slews the clock gradually (rather than jumping) to avoid
+      breaking timers. Accurate time is load-bearing across this whole platform:
+      **TLS** rejects certs that look not-yet-valid/expired under a wrong clock,
+      **Kerberos** auth fails on skew, and correlating **logs** (LPIC logging
+      lesson) across machines is impossible if their clocks disagree — which is why
+      "is NTP synced?" is an early troubleshooting check.
+    cards:
+      - front: "What are the four steps of DHCP (DORA)?"
+        back: "Discover, Offer, Request, Acknowledge."
+      - front: "What does a DHCP lease typically include?"
+        back: "IP address, subnet mask, default gateway, DNS server(s), and a lease time."
+      - front: "What are NTP 'strata'?"
+        back: "A hierarchy of time sources: stratum 0 = reference clock (GPS/atomic), stratum 1 = directly attached server, higher numbers = further from the reference."
+      - cloze: "DHCP uses UDP ports {{c1::67}} (server) and {{c2::68}} (client); a failed lease leaves a host with an {{c3::APIPA}} (169.254.x.x) address."
+    feynman:
+      - "Explain the DORA exchange as a short conversation between client and server."
+      - "Why does so much (TLS, auth, logs) depend on accurate NTP time?"
+    labs:
+      - title: "Diagnose a bad lease"
+        slug: lab-dhcp-diagnose
+        difficulty: core
+        est_minutes: 15
+        scenario: |
+          A laptop shows IP 169.254.12.9 and can't reach anything. The user
+          insists "the wifi is connected."
+        deliverable: |
+          1. Explain what a 169.254.x.x address means here.
+          2. List two likely root causes.
+          3. Give the commands to check the current IP and to request a fresh
+             DHCP lease (Linux).
+        hints: |
+          - APIPA = no DHCP answer.
+          - `ip a`; renew with dhclient/nmcli.
+        solution: |
+          1. 169.254.x.x is **APIPA** — the client got *no* DHCP lease, so it
+             self-assigned a link-local address (works only on the local link).
+          2. Likely causes: the DHCP server is down / out of leases, or the client
+             isn't actually reaching it (VLAN/cable/AP issue, blocked UDP 67/68).
+          3. ```bash
+             ip a                       # confirm the 169.254 address
+             sudo dhclient -r && sudo dhclient   # release + renew
+             # or: nmcli con up <name>
+             ```
+
+quiz:
+  title: "Network Services — chapter exam"
+  slug: netplus-network-services-exam
+  scope: chapter
+  description: "DNS, DHCP, and NTP."
+  questions:
+    - type: mcq
+      text: "Which DNS record maps a hostname to an IPv4 address?"
+      explanation: "A records map names to IPv4; AAAA to IPv6."
+      choices:
+        - {text: "A", correct: true}
+        - {text: "MX"}
+        - {text: "CNAME"}
+        - {text: "TXT"}
+    - type: fill_in
+      text: "The four steps of DHCP spell the acronym ______."
+      explanation: "Discover, Offer, Request, Acknowledge = DORA."
+      answers: ["DORA"]
+    - type: mcq
+      text: "A client shows 169.254.10.4. What happened?"
+      explanation: "APIPA self-assignment — it got no DHCP lease."
+      choices:
+        - {text: "It failed to get a DHCP lease (APIPA)", correct: true}
+        - {text: "It has a public IP"}
+        - {text: "DNS is misconfigured"}
+        - {text: "It is using IPv6"}
+    - type: command
+      text: "Use dig to get just the IPv4 address of example.com."
+      explanation: "`dig +short example.com` prints only the answer."
+      answers:
+        - "dig +short example.com"
+        - {value: "dig \\+short example.com A?", match: regex}
+    - type: mcq
+      text: "Which record type identifies a domain's mail servers?"
+      explanation: "MX records, with priority values."
+      choices:
+        - {text: "MX", correct: true}
+        - {text: "NS"}
+        - {text: "PTR"}
+        - {text: "A"}
+    - type: true_false
+      text: "Accurate NTP time is important for TLS certificate validation."
+      explanation: "True — clock skew can make valid certs appear expired/not-yet-valid."
+      choices:
+        - {text: "True", correct: true}
+        - {text: "False"}

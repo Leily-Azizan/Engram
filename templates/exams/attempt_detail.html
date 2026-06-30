@@ -1,0 +1,44 @@
+{% extends 'base.html' %}
+{% block title %}Results · Engram{% endblock %}
+{% block topbar %}Exam results{% endblock %}
+{% block content %}
+<div class="crumbs"><a href="{% url 'quiz_list' %}">Exams</a> / <a href="{{ attempt.quiz.get_absolute_url }}">{{ attempt.quiz.title }}</a> / Results</div>
+<h1>{{ attempt.quiz.title }} — results</h1>
+
+<div class="card stat" style="max-width:280px;">
+  <div class="num {% if attempt.passed %}good{% else %}brand{% endif %}">{{ attempt.percent }}%</div>
+  <div class="lbl">{{ attempt.score }} / {{ attempt.max_score }} points · {% if attempt.passed %}passed 🎉{% else %}keep practising{% endif %}</div>
+</div>
+
+<div class="card">
+  {% for ans in answers %}
+    <div class="q">
+      <div class="qnum">Question {{ forloop.counter }} · {% if ans.is_correct %}<span class="ans-good">correct</span>{% else %}<span class="ans-bad">incorrect</span>{% endif %}</div>
+      <div class="prose" style="margin:6px 0 10px;">{{ ans.question.text_html|safe }}</div>
+
+      {% if ans.question.qtype == 'mcq' or ans.question.qtype == 'true_false' %}
+        {% for ch in ans.question.choices.all %}
+          <div class="choice {% if ch.is_correct %}correct{% elif ans.selected_choice_id == ch.id %}wrong{% endif %}">
+            {{ ch.text }}
+            {% if ch.is_correct %} ✓{% elif ans.selected_choice_id == ch.id %} ✗ (your answer){% endif %}
+          </div>
+        {% endfor %}
+      {% else %}
+        <p>Your answer: <code>{{ ans.given_text|default:"(blank)" }}</code></p>
+        <p class="muted">Accepted: {% for a in ans.question.accepted_answers.all %}<code>{{ a.value }}</code>{% if not forloop.last %}, {% endif %}{% endfor %}</p>
+      {% endif %}
+
+      {% if ans.question.explanation %}
+        <div class="prose" style="background:#f8f9fc; padding:10px 14px; border-radius:9px; margin-top:8px;">
+          <strong>Why:</strong> {{ ans.question.explanation_html|safe }}
+        </div>
+      {% endif %}
+    </div>
+  {% endfor %}
+</div>
+
+<div class="btn-row">
+  <a class="btn" href="{% url 'quiz_take' attempt.quiz.slug %}">Retake</a>
+  <a class="btn primary" href="{% url 'dashboard' %}">Back to dashboard</a>
+</div>
+{% endblock %}

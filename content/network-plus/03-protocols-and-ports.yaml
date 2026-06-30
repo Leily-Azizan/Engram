@@ -1,0 +1,156 @@
+chapter:
+  title: "Common Protocols and Ports"
+  slug: protocols-and-ports
+  order: 3
+  summary: "The application protocols and well-known port numbers every engineer should know cold."
+
+lessons:
+  - title: "Well-known ports and their protocols"
+    slug: well-known-ports
+    order: 1
+    est_minutes: 25
+    summary: "The port numbers that come up constantly in firewalls, configs, and troubleshooting."
+    body: |
+      ## Ports identify services
+
+      An IP address gets you to the **host**; the **port** gets you to the right
+      **service** on that host. Ports 0–1023 are the **well-known** ports.
+
+      ## The must-know table
+
+      | Port | Protocol | Transport | What it's for |
+      |------|----------|-----------|---------------|
+      | 20/21 | FTP | TCP | File transfer (data/control) |
+      | 22 | SSH / SFTP | TCP | Secure shell & file transfer |
+      | 23 | Telnet | TCP | Insecure remote shell (avoid) |
+      | 25 | SMTP | TCP | Sending email |
+      | 53 | DNS | UDP/TCP | Name resolution |
+      | 67/68 | DHCP | UDP | Automatic IP configuration |
+      | 80 | HTTP | TCP | Web (unencrypted) |
+      | 110 | POP3 | TCP | Retrieving email |
+      | 143 | IMAP | TCP | Retrieving email (server-side) |
+      | 161/162 | SNMP | UDP | Network monitoring |
+      | 389 | LDAP | TCP | Directory services |
+      | 443 | HTTPS | TCP | Web (TLS-encrypted) |
+      | 3389 | RDP | TCP | Remote Desktop |
+
+      ### Secure vs insecure pairs
+
+      - Web: **80 HTTP** → **443 HTTPS**
+      - Remote shell: **23 Telnet** → **22 SSH**
+      - Mail retrieval adds TLS variants (POP3S 995, IMAPS 993).
+
+      Memorise 22, 53, 80, and 443 first — you'll use them daily.
+    deep_dive: |
+      ### What a port really is: sockets and the 4-tuple
+
+      A port isn't a physical thing — it's a **16-bit number** (0–65535) the
+      transport layer (TCP/UDP) uses to deliver data to the right **process**. The
+      OS keeps a table of **sockets**; a listening server socket is identified by
+      `(protocol, local-IP, local-port)`, e.g. `(TCP, 0.0.0.0, 443)` for a web
+      server. When packets arrive, the kernel reads the L4 header's destination
+      port and hands the payload to whichever process owns that socket. That's the
+      whole mechanism behind "the port gets you to the service."
+
+      **An established connection is a 4-tuple:** `(srcIP, srcPort, dstIP,
+      dstPort)`. This is why thousands of browsers can all talk to a server on port
+      443 simultaneously: each connection differs in the **client** IP/port even
+      though the server side is identical. The client side uses an **ephemeral
+      port** (a high, temporary port the OS picks, ~32768–60999 on Linux); the
+      server side uses the well-known port. So `:443` is only the *destination* of
+      the first packet — the conversation is uniquely keyed by all four values.
+
+      **Why ports below 1024 are "privileged":** historically only root can bind
+      them, so a random user program can't impersonate the SSH or HTTPS service on
+      a multi-user host. (This is the same least-privilege idea as the LPIC
+      permissions/SUID lessons.)
+
+      **TCP vs UDP at the socket level:** a TCP socket tracks connection *state*
+      (the handshake, sequence numbers, the 4-tuple); a UDP socket is stateless —
+      it just receives datagrams addressed to its port, which is why a single UDP
+      socket can serve many clients with less bookkeeping (DNS, DHCP). Tools like
+      `ss -tulnp` (LPIC networking lesson) are literally dumping this kernel socket
+      table: protocol, local address:port, state, and the owning process.
+    cards:
+      - front: "What port does HTTPS use, and over which transport?"
+        back: "443 over TCP."
+      - front: "Which port and transport does DNS primarily use?"
+        back: "53 — UDP for normal lookups (TCP for large responses / zone transfers)."
+      - front: "Telnet (23) vs SSH (22): which should you use and why?"
+        back: "SSH (22) — it's encrypted. Telnet (23) sends everything, including passwords, in clear text."
+      - front: "Which ports does DHCP use?"
+        back: "67 (server) and 68 (client), over UDP."
+      - cloze: "SSH listens on port {{c1::22}}, HTTP on {{c2::80}}, and HTTPS on {{c3::443}}."
+      - cloze: "SNMP (monitoring) uses port {{c1::161}} (and traps on 162) over {{c2::UDP}}."
+    feynman:
+      - "Explain the difference between an IP address and a port using a building/apartment analogy."
+      - "Why is it a problem to leave Telnet (23) open on a server?"
+    labs:
+      - title: "Read a firewall like a pro"
+        slug: lab-read-firewall
+        difficulty: core
+        est_minutes: 20
+        scenario: |
+          You inherit a server whose firewall allows inbound TCP 22, 80, 443 and
+          UDP 53, and blocks everything else. Management asks what the box can do
+          and what's intentionally restricted.
+        deliverable: |
+          1. State which services are reachable and from the port list.
+          2. Explain why 53 is UDP here.
+          3. The previous admin asked to "open Telnet for convenience." Write your
+             recommendation and the safer alternative.
+          4. Show one command to check if port 443 is actually listening locally.
+        hints: |
+          - 22=SSH, 80=HTTP, 443=HTTPS, 53=DNS.
+          - Check listeners: `ss -tlnp` or `ss -tulnp`.
+        solution: |
+          1. Reachable: SSH (22), HTTP (80), HTTPS (443), and DNS (53/UDP). So it's
+             a web server you can administer over SSH that also answers DNS.
+          2. DNS uses UDP for fast, small query/response; TCP is only needed for
+             large responses or zone transfers.
+          3. **Do not open Telnet (23)** — it's clear-text. SSH (22) already
+             provides encrypted remote access; use that.
+          4. ```bash
+             ss -tlnp | grep ':443'
+             ```
+
+quiz:
+  title: "Protocols & Ports — chapter exam"
+  slug: netplus-ports-exam
+  scope: chapter
+  description: "Well-known ports and the protocols behind them."
+  questions:
+    - type: fill_in
+      text: "HTTPS uses TCP port ____."
+      explanation: "443."
+      answers: ["443"]
+    - type: fill_in
+      text: "SSH listens on TCP port ____."
+      explanation: "22."
+      answers: ["22"]
+    - type: mcq
+      text: "Which protocol/port should replace insecure Telnet?"
+      explanation: "SSH on port 22 provides an encrypted remote shell."
+      choices:
+        - {text: "SSH (22)", correct: true}
+        - {text: "FTP (21)"}
+        - {text: "SMTP (25)"}
+        - {text: "RDP (3389)"}
+    - type: mcq
+      text: "DNS primarily uses which transport for standard lookups?"
+      explanation: "UDP on port 53 for normal queries; TCP for large responses/zone transfers."
+      choices:
+        - {text: "UDP", correct: true}
+        - {text: "TCP only"}
+        - {text: "ICMP"}
+        - {text: "HTTP"}
+    - type: fill_in
+      text: "Plain (unencrypted) web traffic uses port ____."
+      explanation: "HTTP = 80."
+      answers: ["80"]
+    - type: true_false
+      text: "DHCP uses UDP ports 67 and 68."
+      explanation: "True — 67 server, 68 client, both UDP."
+      choices:
+        - {text: "True", correct: true}
+        - {text: "False"}

@@ -1,0 +1,137 @@
+chapter:
+  title: "User Interfaces and Desktops"
+  slug: user-interfaces-desktops
+  order: 7
+  summary: "How the Linux graphical stack fits together: X11/Wayland, display managers, and remote display."
+
+lessons:
+  - title: "The graphical stack and display managers"
+    slug: graphical-stack
+    order: 1
+    est_minutes: 18
+    summary: "X11 vs Wayland, desktop environments, and how a GUI login works."
+    body: |
+      ## Layers of the GUI
+
+      ```
+      Desktop Environment (GNOME, KDE, XFCE)
+          → Window Manager
+              → Display Server (X11 / Wayland)
+                  → Kernel / drivers / GPU
+      ```
+
+      - **Display server** draws windows and handles input. The classic one is
+        **X11 (Xorg)**; the modern replacement is **Wayland**.
+      - **Display manager** is the graphical login screen and session starter —
+        e.g. **GDM** (GNOME), **SDDM** (KDE), **LightDM**.
+      - **Desktop environment** is the full user experience (panels, file
+        manager, settings): GNOME, KDE Plasma, XFCE.
+
+      ### Managing the GUI on a systemd box
+
+      ```bash
+      systemctl get-default              # graphical.target = GUI on boot
+      systemctl set-default multi-user.target   # boot to text instead
+      systemctl status gdm               # the display manager service
+      echo "$XDG_SESSION_TYPE"           # x11 or wayland
+      ```
+
+      ## Remote and accessibility
+
+      - **X forwarding over SSH**: `ssh -X user@host` then launch a GUI app — it
+        displays on your machine. (`-Y` for trusted forwarding.)
+      - **Accessibility** features include the on-screen keyboard, screen reader
+        (Orca), high-contrast themes, and sticky/slow keys.
+    deep_dive: |
+      ### X11 is a network protocol; Wayland deliberately isn't
+
+      **X11 is client/server, and the names are "backwards."** The **X server** is
+      the program running *on your machine* that owns the screen, keyboard, and
+      mouse; each GUI app is an **X client** that connects to it — over a Unix
+      socket locally, or TCP (`display :0`) across a network — and sends drawing
+      requests. `$DISPLAY` tells a client which server to talk to. This network
+      transparency is precisely why `ssh -X` works: SSH opens a tunnel, sets
+      `$DISPLAY` on the remote side to point back through it, so a program running
+      on the server renders its windows on your local X server.
+
+      **Wayland folds the server into the compositor.** X11's split is old and
+      leaky — any client could read another's input and pixels, a real security
+      hole. Wayland makes the **compositor** the display server, talking directly
+      to the kernel's DRM/KMS and `evdev` input, with clients rendering their own
+      buffers and handing them over. There's no built-in network protocol by
+      design, which is faster and more isolated but why plain `ssh -X` doesn't
+      forward Wayland apps (you use `waypipe` or fall back to X).
+
+      **The display manager is a privileged bootstrap.** GDM/SDDM run as root at
+      `graphical.target`, draw the greeter, authenticate you through **PAM**, then
+      drop privileges and launch your session's compositor and desktop —
+      `$XDG_SESSION_TYPE` records whether you landed on `x11` or `wayland`.
+    cards:
+      - front: "What is a display manager, and name one."
+        back: "The graphical login screen / session starter — e.g. GDM, SDDM, or LightDM."
+      - front: "X11 vs Wayland — what are they?"
+        back: "Display servers that draw windows and handle input. X11 (Xorg) is the classic one; Wayland is the modern successor."
+      - front: "How do you run a remote GUI app and see it locally over SSH?"
+        back: "`ssh -X user@host` (X11 forwarding), then launch the app; use `-Y` for trusted forwarding."
+      - cloze: "On a systemd system, the GUI boot target is `{{c1::graphical.target}}` and the text-only one is `{{c2::multi-user.target}}`."
+    feynman:
+      - "Explain how the desktop environment, window manager, and display server differ."
+    labs:
+      - title: "GUI on/off switch"
+        slug: lab-gui-toggle
+        difficulty: core
+        est_minutes: 12
+        scenario: |
+          A server accidentally boots into a full desktop, wasting RAM. You want
+          it to boot to CLI but keep the option to start the GUI on demand.
+        deliverable: |
+          1. Show the current default target.
+          2. Set it to boot to multi-user (text) mode.
+          3. Identify the display manager service running on a desktop box.
+          4. Say which command would switch to the GUI immediately without reboot.
+        hints: |
+          - `systemctl get-default` / `set-default`
+          - `systemctl status gdm` (or sddm/lightdm)
+          - `systemctl isolate graphical.target`
+        solution: |
+          ```bash
+          systemctl get-default
+          sudo systemctl set-default multi-user.target
+          systemctl status gdm    # or sddm / lightdm
+          sudo systemctl isolate graphical.target   # start GUI now
+          ```
+
+quiz:
+  title: "User Interfaces & Desktops — chapter exam"
+  slug: lpic1-user-interfaces-exam
+  scope: chapter
+  description: "Graphical stack, display managers, remote display."
+  questions:
+    - type: mcq
+      text: "Which of these is a display manager (graphical login)?"
+      explanation: "GDM, SDDM, and LightDM are display managers; GNOME is a desktop environment."
+      choices:
+        - {text: "GDM", correct: true}
+        - {text: "GNOME"}
+        - {text: "Xorg"}
+        - {text: "systemd"}
+    - type: mcq
+      text: "Which is the modern successor to the X11 display server?"
+      explanation: "Wayland replaces X11/Xorg on many modern systems."
+      choices:
+        - {text: "Wayland", correct: true}
+        - {text: "GNOME"}
+        - {text: "GDM"}
+        - {text: "VNC"}
+    - type: command
+      text: "SSH into host 'box' as 'leily' with X11 forwarding enabled."
+      explanation: "`ssh -X` enables X11 forwarding."
+      answers:
+        - "ssh -X leily@box"
+        - {value: "ssh -X leily@box", match: exact}
+    - type: true_false
+      text: "graphical.target boots the system into a GUI by default."
+      explanation: "True — it's the systemd target for a graphical multi-user system."
+      choices:
+        - {text: "True", correct: true}
+        - {text: "False"}

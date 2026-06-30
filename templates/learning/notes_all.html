@@ -1,0 +1,26 @@
+{% extends 'base.html' %}
+{% load content_extras %}
+{% block title %}My notes · Engram{% endblock %}
+{% block topbar %}My notes{% endblock %}
+{% block content %}
+<h1>📒 My notes</h1>
+<p class="subtitle">Everything you've written in your own words, across all courses.</p>
+
+<form method="get" class="form-row" style="max-width:420px;">
+  <input type="text" name="q" value="{{ query }}" placeholder="Search your notes…">
+</form>
+
+{% for note in notes %}
+  {% if note.body_md %}
+  <div class="card">
+    <div style="display:flex; justify-content:space-between; align-items:baseline;">
+      <a href="{{ note.target_url }}"><strong>{{ note.target_label }}</strong></a>
+      <span class="meta">{{ note.updated_at|date:"M j, Y" }}</span>
+    </div>
+    <div class="prose">{{ note.body_html|safe }}</div>
+  </div>
+  {% endif %}
+{% empty %}
+  <div class="empty">No notes yet. Open any lesson and jot what clicked for you in the “My notes” box.</div>
+{% endfor %}
+{% endblock %}

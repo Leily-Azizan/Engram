@@ -1,0 +1,180 @@
+chapter:
+  title: "Data: Volumes and Bind Mounts"
+  slug: volumes-and-data
+  order: 4
+  summary: "Persist data beyond a container's life, and share files between host and container."
+
+lessons:
+  - title: "Volumes, bind mounts, and tmpfs"
+    slug: volumes-bind-tmpfs
+    order: 1
+    est_minutes: 22
+    summary: "The three ways to mount storage into a container, and when to use each."
+    body: |
+      ## Why containers need volumes
+
+      A container's writable layer is **ephemeral** — `docker rm` and the data is
+      gone. Anything that must survive (databases, uploads) has to live **outside**
+      the writable layer. Docker gives you three mount types:
+
+      | Type | Where data lives | Use for |
+      |------|------------------|---------|
+      | **Volume** | Docker-managed area on host | databases, app data (preferred) |
+      | **Bind mount** | a specific host path | dev (live-edit source), config files |
+      | **tmpfs** | host RAM (not disk) | secrets/scratch you never want persisted |
+
+      ## Named volumes (the default choice)
+
+      ```bash
+      docker volume create appdata
+      docker run -d -v appdata:/var/lib/postgresql/data postgres
+      docker volume ls
+      docker volume inspect appdata
+      ```
+
+      Data in `appdata` outlives any container. Multiple containers can share it.
+
+      ## Bind mounts (host path → container)
+
+      ```bash
+      docker run -d -v "$PWD":/app node:20      # live source for development
+      docker run -v /etc/myconf:/etc/app:ro app # read-only config
+      ```
+
+      The newer `--mount` syntax is explicit and preferred in scripts:
+
+      ```bash
+      docker run --mount type=volume,src=appdata,dst=/data postgres
+      docker run --mount type=bind,src="$PWD",dst=/app node:20
+      ```
+
+      ## tmpfs
+
+      ```bash
+      docker run --tmpfs /run:size=64m app      # in-RAM, vanishes on stop
+      ```
+    deep_dive: |
+      ### How a mount bypasses the union filesystem
+
+      Recall that a container's filesystem is the image's read-only layers unioned
+      with a writable copy-on-write layer (chapter 1). A **volume or bind mount is
+      not part of that union at all** — it's a separate filesystem location
+      *mounted over* a path in the container, using the same Linux bind-mount
+      mechanism you met in the LPIC mount lesson.
+
+      That single fact explains the behaviour you'll hit:
+
+      - **Writes go straight to the mounted filesystem**, not the CoW layer. So
+        they're fast (no copy-up), unbounded by the writable layer, and **survive
+        `docker rm`** because they live outside the container.
+      - **The mount shadows whatever was at that path in the image.** Bind-mount an
+        empty host dir onto `/app` and the image's `/app` contents disappear from
+        view — a classic "my files vanished" gotcha in dev setups.
+      - **Named volumes have a populate-on-first-use nicety:** when you mount an
+        *empty* named volume onto a path that already has files in the image,
+        Docker copies the image's files into the fresh volume first. Bind mounts do
+        **not** do this — they just overlay.
+
+      **Where the bytes actually are:**
+      - Named volumes live under `/var/lib/docker/volumes/<name>/_data` on the host,
+        managed by Docker (or by a **volume driver/plugin** for NFS, cloud disks,
+        etc. — the same API, different backend).
+      - Bind mounts are literally a host path, so permissions/UIDs are the host's —
+        which is why a container process running as UID 1000 may get "permission
+        denied" on a bind-mounted dir owned by a different host UID. Volumes avoid
+        this because Docker manages ownership.
+      - tmpfs is a `tmpfs` mount = RAM. Nothing ever touches disk, so it's ideal
+        for secrets you don't want persisted and for scratch that benefits from
+        RAM speed.
+
+      **Lifecycle is the key design point:** volumes are independent objects with
+      their own lifecycle (`docker volume rm`), *not* tied to any container. That
+      decoupling is why the rule is "containers are cattle, data is a pet": you
+      destroy and recreate containers freely, and the stateful data persists in a
+      volume the new container re-attaches to.
+    cards:
+      - front: "Why can't important data live in a container's writable layer?"
+        back: "The writable layer is ephemeral — it's destroyed with the container (`docker rm`). Persistent data must live in a volume or bind mount, outside the union filesystem."
+      - front: "Volume vs bind mount vs tmpfs — one use each."
+        back: "Volume = Docker-managed persistent app data (DBs); bind mount = a specific host path (dev source, config); tmpfs = in-RAM, never persisted (secrets/scratch)."
+      - front: "What happens if you bind-mount an empty host directory over an image path that had files?"
+        back: "The mount shadows the image's contents, so those files seem to vanish. (Empty *named volumes*, unlike binds, get pre-populated with the image's files.)"
+      - front: "Where do named volumes physically live, and why does that avoid bind-mount permission issues?"
+        back: "Under /var/lib/docker/volumes/<name>/_data, managed by Docker (so it handles ownership). Bind mounts use raw host paths with host UIDs, which can cause permission-denied."
+      - cloze: "A volume/bind mount {{c1::bypasses}} the union filesystem — writes go straight to the mounted location and {{c2::survive}} container removal."
+      - cloze: "Mount a path read-only by appending `:{{c1::ro}}` (e.g. `-v /etc/conf:/etc/app:ro`)."
+    feynman:
+      - "Explain why a bind-mounted empty folder makes the image's files at that path disappear."
+      - "Why is data in a named volume safe across `docker rm` and `docker run` of a new container?"
+    labs:
+      - title: "Persist a database across container rebuilds"
+        slug: lab-volume-persistence
+        difficulty: challenge
+        est_minutes: 24
+        scenario: |
+          You must prove that a Postgres container's data survives destroying and
+          recreating the container — the core reason volumes exist.
+        deliverable: |
+          1. Run Postgres with a named volume for its data dir.
+          2. Create a table and insert a row.
+          3. `docker rm -f` the container, then `docker run` a NEW one attached to
+             the same volume.
+          4. Show the row is still there. Then show what happens WITHOUT a volume.
+        hints: |
+          - `-v pgdata:/var/lib/postgresql/data`
+          - `docker exec ... psql`
+        solution: |
+          ```bash
+          docker run -d --name pg -e POSTGRES_PASSWORD=x \
+            -v pgdata:/var/lib/postgresql/data postgres
+          docker exec -it pg psql -U postgres -c "create table t(x int); insert into t values(42);"
+          docker rm -f pg
+          docker run -d --name pg2 -e POSTGRES_PASSWORD=x \
+            -v pgdata:/var/lib/postgresql/data postgres
+          docker exec -it pg2 psql -U postgres -c "select * from t;"   # 42 survives
+          ```
+          Without `-v`, the new container starts with an empty database — the data
+          died with the old container's writable layer.
+
+quiz:
+  title: "Volumes & Data — chapter exam"
+  slug: docker-volumes-exam
+  scope: chapter
+  description: "Persistence with volumes, bind mounts, and tmpfs."
+  questions:
+    - type: mcq
+      text: "Which mount type is preferred for a database's persistent data?"
+      explanation: "A named volume — Docker-managed, persistent, and ownership-handled."
+      choices:
+        - {text: "Named volume", correct: true}
+        - {text: "Bind mount"}
+        - {text: "tmpfs"}
+        - {text: "The writable layer"}
+    - type: true_false
+      text: "Data written to a container's writable layer survives `docker rm`."
+      explanation: "False — the writable layer is destroyed with the container."
+      choices:
+        - {text: "True"}
+        - {text: "False", correct: true}
+    - type: command
+      text: "Run postgres mounting the named volume 'pgdata' at /var/lib/postgresql/data (use -v)."
+      explanation: "`docker run -v pgdata:/var/lib/postgresql/data postgres` (other flags allowed)."
+      answers:
+        - {value: "docker run .*-v pgdata:/var/lib/postgresql/data.* postgres", match: regex}
+        - {value: "docker run -v pgdata:/var/lib/postgresql/data postgres", match: exact}
+    - type: mcq
+      text: "You bind-mount an empty host dir onto /app which had files in the image. What happens?"
+      explanation: "The mount shadows the image path, so those files are hidden."
+      choices:
+        - {text: "The image's /app files are hidden by the mount", correct: true}
+        - {text: "The host dir is filled with the image files"}
+        - {text: "The build fails"}
+        - {text: "Nothing changes"}
+    - type: mcq
+      text: "Which mount type stores data in RAM and never on disk?"
+      explanation: "tmpfs — ideal for secrets/scratch you don't want persisted."
+      choices:
+        - {text: "tmpfs", correct: true}
+        - {text: "volume"}
+        - {text: "bind mount"}
+        - {text: "overlay"}

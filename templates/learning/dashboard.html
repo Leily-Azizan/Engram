@@ -1,0 +1,92 @@
+{% extends 'base.html' %}
+{% block title %}Dashboard · Engram{% endblock %}
+{% block topbar %}Dashboard{% endblock %}
+{% block content %}
+<h1>Hi {{ user.first_name|default:user.username }} 👋</h1>
+<p class="subtitle">Here's where you stand today. Small, consistent reps beat cramming.</p>
+
+<div class="grid cols-4">
+  <div class="card stat"><div class="num brand">🔥 {{ streak }}</div><div class="lbl">day streak</div></div>
+  <div class="card stat"><div class="num">{{ review_counts.due }}</div><div class="lbl">cards due</div></div>
+  <div class="card stat"><div class="num">{{ lessons_learned }}</div><div class="lbl">lessons learned</div></div>
+  <div class="card stat"><div class="num good">{{ labs_done }}</div><div class="lbl">labs done</div></div>
+</div>
+
+<div class="grid cols-2">
+  <div class="card">
+    <h3>🎯 Start studying</h3>
+    <p class="muted">An interleaved session mixes recall, a quiz, and a hands-on lab — the way memory actually sticks.</p>
+    <div class="btn-row">
+      <a class="btn primary" href="{% url 'session' %}">Start today's session</a>
+      <a class="btn" href="{% url 'review' %}">Review {{ review_counts.due }} due {% if review_counts.new %}(+{{ review_counts.new }} new){% endif %}</a>
+    </div>
+    {% if next_lesson %}
+      <hr>
+      <div class="muted" style="font-size:13px;">What to study next</div>
+      <a href="{{ next_lesson.get_absolute_url }}"><strong>{{ next_lesson.title }}</strong></a>
+      <div class="muted" style="font-size:13px;">{{ next_lesson.chapter.course.name }} · {{ next_lesson.chapter.title }}</div>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h3>📚 Course progress</h3>
+    {% for row in courses_progress %}
+      <div style="margin-bottom:12px;">
+        <div style="display:flex; justify-content:space-between; font-size:14px;">
+          <a href="{{ row.course.get_absolute_url }}">{{ row.course.icon }} {{ row.course.name }}</a>
+          <span class="muted">{{ row.progress.learned }}/{{ row.progress.total }} · {{ row.progress.pct }}%</span>
+        </div>
+        <div class="bar good"><span style="width:{{ row.progress.pct }}%"></span></div>
+      </div>
+    {% empty %}
+      <p class="muted">No courses yet. Run <code>manage.py seed_content</code> to load them.</p>
+    {% endfor %}
+  </div>
+</div>
+
+<div class="grid cols-2">
+  <div class="card">
+    <h3>⚠️ Weak spots</h3>
+    {% if weak_attempts %}
+      <ul class="list">
+        {% for a in weak_attempts %}
+          <li><a href="{{ a.quiz.get_absolute_url }}">{{ a.quiz.title }}</a>
+            <span class="badge amber">{{ a.percent }}%</span></li>
+        {% endfor %}
+      </ul>
+      <p class="hint">Quizzes you last scored below 70% on — revisit these.</p>
+    {% else %}
+      <p class="muted">No weak spots flagged yet. Take some quizzes to populate this.</p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h3>🛠️ Open labs</h3>
+    {% if open_labs %}
+      <ul class="list">
+        {% for la in open_labs %}
+          <li><a href="{{ la.lab.get_absolute_url }}">{{ la.lab.title }}</a>
+            <span class="badge {% if la.status == 'in_progress' %}amber{% else %}slate{% endif %}">{{ la.get_status_display }}</span></li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="muted">No labs in progress. <a href="{% url 'lab_list' %}">Pick one</a> and build something.</p>
+    {% endif %}
+  </div>
+</div>
+
+{% if recent_attempts %}
+<div class="card">
+  <h3>🕘 Recent exam attempts</h3>
+  <ul class="list">
+    {% for a in recent_attempts %}
+      <li><a href="{% url 'attempt_detail' a.id %}">{{ a.quiz.title }}</a>
+        <span>
+          <span class="badge {% if a.passed %}emerald{% else %}amber{% endif %}">{{ a.score }}/{{ a.max_score }} · {{ a.percent }}%</span>
+          <span class="meta">{{ a.started_at|date:"M j" }}</span>
+        </span></li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+{% endblock %}

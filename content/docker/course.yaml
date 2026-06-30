@@ -1,0 +1,12 @@
+slug: docker
+name: "Docker & Containers"
+icon: "🐳"
+order: 4
+description: |
+  Package, ship, and run applications in containers. Covers images and layers,
+  running and managing containers, writing Dockerfiles, persisting data with
+  volumes, container networking and Docker Compose, and registries and
+  production best practices. Every lesson includes an "Under the hood" deep dive
+  into the Linux mechanisms (namespaces, cgroups, overlayfs, bridge networking)
+  that actually make containers work — so you understand containers, not just
+  the CLI.

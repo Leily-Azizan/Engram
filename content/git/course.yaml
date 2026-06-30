@@ -1,0 +1,11 @@
+slug: git
+name: "Git & Version Control"
+icon: "🌿"
+order: 3
+description: |
+  Version control with Git — the foundation under everything else in DevOps.
+  Covers repositories, staging and commits, branching and merging, remotes and
+  collaboration, rebasing and recovering from mistakes, and team workflows. Deep
+  dives reveal Git's elegant content-addressed object model (blobs, trees,
+  commits, the DAG) so commands like merge, rebase, and reset stop feeling like
+  magic.

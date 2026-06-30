@@ -1,0 +1,251 @@
+chapter:
+  title: "Shells and Shell Scripting"
+  slug: shells-and-scripting
+  order: 6
+  summary: "Customise your shell environment and automate work with Bash scripts."
+
+lessons:
+  - title: "Customise and use the shell environment"
+    slug: shell-environment
+    order: 1
+    est_minutes: 20
+    summary: "Startup files, variables, aliases, and functions."
+    body: |
+      ## Login vs non-login, interactive vs not
+
+      Which startup files Bash reads depends on *how* it started:
+
+      | Shell type | Files read |
+      |------------|-----------|
+      | Login shell | `/etc/profile` → `~/.bash_profile` (or `~/.profile`) |
+      | Interactive non-login | `~/.bashrc` |
+      | Most setups | `.bash_profile` sources `.bashrc`, so put things in `.bashrc` |
+
+      ## Variables, aliases, functions
+
+      ```bash
+      export PATH="$HOME/bin:$PATH"     # prepend a dir to PATH
+      alias gs='git status'            # short alias
+      mkcd() { mkdir -p "$1" && cd "$1"; }   # function with an argument
+      ```
+
+      Put aliases/functions/exports in `~/.bashrc` to make them permanent. Apply
+      changes without logging out:
+
+      ```bash
+      source ~/.bashrc      # or:  . ~/.bashrc
+      ```
+    deep_dive: |
+      ### Why the startup-file rules exist, and what `source` really does
+
+      **Login vs interactive maps to *how* bash was started.** When you log in via
+      console, SSH, or a display manager, PAM hands you a **login shell**, which
+      reads `/etc/profile` and `~/.bash_profile` *once* to build your environment.
+      Every shell you open afterwards is a child that already **inherited** that
+      environment through `fork()`, so it would be wasteful to re-read the profile
+      — instead an interactive child reads only `~/.bashrc` for per-shell niceties
+      (aliases, prompt). That inheritance is also why setting `PATH` in
+      `.bash_profile` "sticks" everywhere: children copy the parent's environment.
+
+      **`source` runs in the *current* shell — and that's the whole point.** Run a
+      script normally (`./script`) and bash `fork()`s a child to execute it; any
+      variable, `cd`, or alias it sets dies with that child when it exits. So
+      editing `.bashrc` and running it as a program would change nothing in your
+      session. `source` (or `.`) instead reads the file's lines straight into the
+      *current* shell process — no fork — so its `export`s and functions land in
+      the shell you're sitting in. The same trick is why activating a Python
+      virtualenv requires `source activate`, not running it.
+    cards:
+      - front: "Which file should you put aliases and PATH changes in so they apply to every interactive shell?"
+        back: "`~/.bashrc` (login shells usually source it via `~/.bash_profile`)."
+      - front: "How do you apply changes to ~/.bashrc without logging out?"
+        back: "`source ~/.bashrc` (or `. ~/.bashrc`)."
+      - cloze: "A {{c1::login}} shell reads `/etc/profile` and `~/.bash_profile`; an interactive non-login shell reads `~/.{{c2::bashrc}}`."
+    feynman:
+      - "Explain the difference between an alias and a shell function, and when you need a function."
+    labs:
+      - title: "Build your shell toolkit"
+        slug: lab-shell-toolkit
+        difficulty: intro
+        est_minutes: 15
+        scenario: |
+          You want a personal `~/bin` for scripts and a couple of quality-of-life
+          shortcuts on every new shell.
+        deliverable: |
+          1. Add `~/bin` to your PATH permanently.
+          2. Add an alias `ll='ls -alh'` and a function `mkcd` that makes a
+             directory and cds into it.
+          3. Reload your config and prove all three work.
+        hints: |
+          - Edit `~/.bashrc`, then `source` it.
+        solution: |
+          ```bash
+          cat >> ~/.bashrc <<'EOF'
+          export PATH="$HOME/bin:$PATH"
+          alias ll='ls -alh'
+          mkcd() { mkdir -p "$1" && cd "$1"; }
+          EOF
+          source ~/.bashrc
+          mkdir -p ~/bin && echo 'echo hi' > ~/bin/hi && chmod +x ~/bin/hi && hi
+          ll ~; mkcd /tmp/demo && pwd
+          ```
+
+  - title: "Write Bash scripts"
+    slug: bash-scripting
+    order: 2
+    est_minutes: 28
+    summary: "Shebangs, arguments, conditionals, loops, and exit codes."
+    body: |
+      ## Anatomy of a script
+
+      ```bash
+      #!/usr/bin/env bash         # shebang: which interpreter
+      set -euo pipefail           # safer Bash: exit on error/unset/pipe failure
+
+      name="$1"                   # first positional argument
+      echo "Hello, ${name:-world}"   # default if unset
+      ```
+
+      Make it executable and run it:
+
+      ```bash
+      chmod +x greet.sh
+      ./greet.sh Leily
+      ```
+
+      ## Conditionals
+
+      ```bash
+      if [ -f /etc/passwd ]; then
+        echo "exists"
+      elif [ "$count" -gt 10 ]; then
+        echo "many"
+      else
+        echo "no"
+      fi
+      ```
+
+      Common test operators: `-f` file exists, `-d` dir exists, `-z` empty
+      string, `-eq/-gt/-lt` numeric, `=`/`!=` string.
+
+      ## Loops
+
+      ```bash
+      for f in *.log; do gzip "$f"; done
+      while read -r line; do echo "$line"; done < input.txt
+      ```
+
+      ## Exit codes
+
+      Every command returns a status: `0` = success, non-zero = failure. Check
+      the last one with `$?`. Your script should `exit 0` on success and a
+      non-zero code on failure so other tools can react.
+
+      ```bash
+      grep -q root /etc/passwd && echo "found" || echo "missing"
+      ```
+    deep_dive: |
+      ### Shebangs, exit codes, and why `[` needs spaces
+
+      **The shebang is read by the kernel, not bash.** When you run `./greet.sh`,
+      `execve()` looks at the first two bytes; if they're `#!`, the kernel runs the
+      named interpreter and passes the script path as its argument — so
+      `#!/usr/bin/env bash` literally launches `env`, which finds `bash` on `$PATH`.
+      With no shebang, the *calling* shell falls back to running it with `/bin/sh`,
+      which is why a script using bash-only features can fail mysteriously when
+      invoked the wrong way.
+
+      **Exit codes are an 8-bit number the parent reaps.** When a process exits,
+      its status is collected by the parent's `wait()` — only the low **8 bits**
+      survive, so codes wrap at 256 and live in `0–255`. `$?` is just that value
+      from the last command; `&&` and `||` are pure short-circuit logic on it
+      (`0` = true). In a pipeline only the last command's status shows by default,
+      which is exactly what `set -o pipefail` (and `$PIPESTATUS`) fixes.
+
+      **`[` is a command, not syntax.** `[` is literally the `test` program (a
+      builtin, with a real `/usr/bin/[` too) whose last argument must be `]`. Since
+      the shell splits the line on spaces into arguments, `[ "$x" = y ]` needs the
+      spaces — `["$x"=y]` is parsed as one unknown command named `[...`. And quoting
+      `"$x"` matters because an empty unquoted variable would vanish during word
+      splitting and leave `test` with the wrong number of arguments.
+    cards:
+      - front: "What does the shebang `#!/usr/bin/env bash` do?"
+        back: "Tells the OS to run the script with whichever `bash` is found on `$PATH` — the first line of an executable script."
+      - front: "What does `set -euo pipefail` give you?"
+        back: "Exit on any error (-e), error on unset variables (-u), and make a pipeline fail if any stage fails (pipefail) — safer scripts."
+      - front: "What does an exit code of 0 mean, and how do you read the last one?"
+        back: "0 = success (non-zero = failure). The last command's status is in `$?`."
+      - cloze: "In a test, `{{c1::-f}}` checks a file exists, `{{c2::-d}}` checks a directory exists, and `{{c3::-z}}` checks a string is empty."
+      - cloze: "The first positional argument to a script is `{{c1::$1}}` and all of them together are `{{c2::$@}}`."
+    feynman:
+      - "Explain why `set -euo pipefail` makes a script safer, with an example of a bug it catches."
+      - "Why do exit codes matter for automation and CI pipelines?"
+    labs:
+      - title: "Backup script with safety rails"
+        slug: lab-backup-script
+        difficulty: challenge
+        est_minutes: 30
+        scenario: |
+          You need a small, robust backup script — the kind you'd actually drop
+          in cron.
+        deliverable: |
+          Write `backup.sh` that:
+          1. Takes a source directory as `$1` and refuses to run (non-zero exit +
+             usage message) if it's missing or not a directory.
+          2. Creates a timestamped `.tar.gz` of it under `~/backups/`.
+          3. Prints the resulting filename and exits 0 on success.
+          Use `set -euo pipefail`.
+        hints: |
+          - Validate: `[ -d "$1" ] || { echo "usage..."; exit 1; }`
+          - Timestamp: `date +%F-%H%M%S`
+          - Archive: `tar czf "$dest" -C "$src" .`
+        solution: |
+          ```bash
+          #!/usr/bin/env bash
+          set -euo pipefail
+          src="${1:-}"
+          [ -n "$src" ] && [ -d "$src" ] || { echo "usage: backup.sh <dir>"; exit 1; }
+          mkdir -p "$HOME/backups"
+          dest="$HOME/backups/$(basename "$src")-$(date +%F-%H%M%S).tar.gz"
+          tar czf "$dest" -C "$src" .
+          echo "Created $dest"
+          ```
+
+quiz:
+  title: "Shells & Scripting — chapter exam"
+  slug: lpic1-shells-scripting-exam
+  scope: chapter
+  description: "Shell environment and Bash scripting."
+  questions:
+    - type: mcq
+      text: "Where should you put an alias so it loads in every interactive shell?"
+      explanation: "`~/.bashrc` is read by interactive shells (login shells source it via the profile)."
+      choices:
+        - {text: "~/.bashrc", correct: true}
+        - {text: "/etc/hostname"}
+        - {text: "~/.ssh/config"}
+        - {text: "/etc/fstab"}
+    - type: command
+      text: "Reload your ~/.bashrc in the current shell (give one form)."
+      explanation: "`source ~/.bashrc` or `. ~/.bashrc`."
+      answers:
+        - "source ~/.bashrc"
+        - ". ~/.bashrc"
+    - type: mcq
+      text: "What does exit code 0 conventionally mean?"
+      explanation: "Zero is success; non-zero indicates an error."
+      choices:
+        - {text: "Success", correct: true}
+        - {text: "Failure"}
+        - {text: "Command not found"}
+        - {text: "Permission denied"}
+    - type: true_false
+      text: "`set -e` makes a Bash script stop at the first command that fails."
+      explanation: "True — it exits on any non-zero status (unless handled)."
+      choices:
+        - {text: "True", correct: true}
+        - {text: "False"}
+    - type: fill_in
+      text: "Inside a script, the first positional argument is referenced as ____."
+      explanation: "$1 is the first argument."
+      answers: ["$1", "1"]

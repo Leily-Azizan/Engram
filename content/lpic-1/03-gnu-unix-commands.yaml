@@ -1,0 +1,701 @@
+chapter:
+  title: "GNU and Unix Commands"
+  slug: gnu-unix-commands
+  order: 3
+  summary: "The everyday command line: navigating, piping, filtering text, and managing processes."
+
+lessons:
+  - title: "Work on the command line"
+    slug: command-line
+    order: 1
+    est_minutes: 20
+    summary: "Shells, the structure of a command, variables, and getting help."
+    body: |
+      ## Anatomy of a command
+
+      ```
+      command  -options  arguments
+      ls       -l        /etc
+      ```
+
+      The **shell** (usually `bash`) reads your line, expands it, and runs it.
+
+      ### Essentials
+
+      ```bash
+      pwd                 # where am I (print working directory)
+      cd /var/log         # change directory
+      echo "$HOME"        # print, with variable expansion
+      type ls             # is it a builtin, alias, or file?
+      which python3       # path of an executable in $PATH
+      ```
+
+      ### Variables and environment
+
+      ```bash
+      name="Leily"        # shell variable (this shell only)
+      export EDITOR=vim   # environment variable (inherited by children)
+      env | grep PATH     # show environment
+      ```
+
+      ### Getting help — the most important skill
+
+      ```bash
+      man ls              # the manual page
+      ls --help           # quick usage
+      apropos network     # search man pages by keyword
+      type cd             # 'cd is a shell builtin'
+      ```
+
+      `history` shows past commands; `!!` re-runs the last one; `Ctrl-R`
+      searches history interactively.
+    deep_dive: |
+      ### How the shell turns a line into a running program
+
+      **Parsing happens in a fixed order.** Before bash runs anything it rewrites
+      your line through expansions, *always* in this sequence: brace `{a,b}` →
+      tilde `~` → parameter/variable `$VAR` → command substitution `$(...)` →
+      arithmetic `$((...))` → word splitting (on `$IFS`) → pathname globbing `*`.
+      Knowing the order explains surprises: globbing runs *last*, so `echo $files`
+      where `files="*.txt"` re-globs the result, while quoting `"$files"` stops
+      word-splitting and globbing entirely.
+
+      **Builtin vs external, and `$PATH` hashing.** Once the word is a command,
+      bash checks in order: function → alias → builtin (`cd`, `export`, `type`) →
+      a file on `$PATH`. `cd` *must* be a builtin — a child process can't change
+      its parent's working directory. For real files bash caches the resolved
+      path in a hash table (`hash`, `type -a`), so a freshly installed binary may
+      still run the old path until `hash -r` clears the cache.
+
+      **Why `export` exists.** A shell variable lives only in this process's
+      memory. `export` flags it to be copied into the `environ` array that
+      `execve()` hands every child — that array *is* the environment. A child can
+      read exported vars but never write back into the parent; this one-way
+      inheritance is why `VAR=x; ./script` doesn't persist after the script exits.
+    cards:
+      - front: "What's the difference between a shell variable and an environment variable?"
+        back: "A shell variable exists only in the current shell; an exported (environment) variable is inherited by child processes. Use `export` to promote one."
+      - front: "How do you find which file a command runs from?"
+        back: "`which <cmd>` (searches `$PATH`) or `type <cmd>` (also reveals builtins/aliases)."
+      - cloze: "`{{c1::man}}` opens a manual page, and `{{c2::apropos}}` searches man pages by keyword."
+      - cloze: "Press `{{c1::Ctrl-R}}` to search your command history interactively."
+    feynman:
+      - "Explain what `export` does and why a child process needs it."
+    labs:
+      - title: "Tame your environment"
+        slug: lab-environment
+        difficulty: intro
+        est_minutes: 15
+        scenario: |
+          You want a new alias and a default editor every time you open a shell.
+        deliverable: |
+          1. Create an alias `ll='ls -alh'` for your current shell.
+          2. Set `EDITOR=vim` so child processes inherit it; prove it with a sub-shell.
+          3. Make both persist across logins.
+        hints: |
+          - `alias`, `export`
+          - Persistence: `~/.bashrc`
+          - Prove inheritance: `bash -c 'echo $EDITOR'`
+        solution: |
+          ```bash
+          alias ll='ls -alh'
+          export EDITOR=vim
+          bash -c 'echo $EDITOR'          # prints vim -> inherited
+          printf "alias ll='ls -alh'\nexport EDITOR=vim\n" >> ~/.bashrc
+          ```
+
+  - title: "Process text streams with filters"
+    slug: text-filters
+    order: 2
+    est_minutes: 25
+    summary: "grep, cut, sort, uniq, wc, sed, head/tail — the text-processing toolkit."
+    body: |
+      ## Everything is text
+
+      Linux administration is largely *filtering text*. These tools read stdin
+      (or files) and write stdout, so they chain together with pipes.
+
+      ```bash
+      cat file            # dump a file
+      head -n 5 file      # first 5 lines
+      tail -n 20 file     # last 20 lines
+      tail -f /var/log/syslog   # follow live
+      wc -l file          # count lines
+      ```
+
+      ### Searching and selecting
+
+      ```bash
+      grep "error" app.log          # lines containing "error"
+      grep -i -n "warn" app.log     # case-insensitive, with line numbers
+      grep -r "TODO" src/           # recursive
+      cut -d: -f1 /etc/passwd       # field 1, ':' delimited -> usernames
+      ```
+
+      ### Sorting and counting uniques
+
+      ```bash
+      sort names.txt
+      sort -n sizes.txt             # numeric sort
+      sort file | uniq -c | sort -rn   # frequency count, most common first
+      ```
+
+      ### Stream editing
+
+      ```bash
+      sed 's/foo/bar/g' file        # replace foo with bar everywhere
+      tr 'a-z' 'A-Z' < file         # translate to uppercase
+      ```
+    deep_dive: |
+      ### Pipes, buffering, and why filters are fast
+
+      **A pipe is a kernel ring buffer.** `cmd1 | cmd2` calls `pipe()`, which
+      gives the kernel a small in-memory buffer (~64 KB on Linux); cmd1's stdout
+      is wired to the write end, cmd2's stdin to the read end. Both run
+      *concurrently* — cmd2 doesn't wait for cmd1 to finish. If the buffer fills,
+      the writer blocks until the reader drains it (back-pressure); if the reader
+      closes early (`... | head`), the writer gets **SIGPIPE** and dies — that's
+      how a pipeline stops cleanly.
+
+      **The buffering trap.** The C stdio library picks buffering by destination:
+      *line-buffered* to a terminal, but *fully block-buffered* (4–8 KB) into a
+      pipe. That's why `tail -f log | grep err` can sit silent — grep's output is
+      stuck in a block buffer, not lost. `grep --line-buffered` or `stdbuf -oL`
+      force line buffering to fix it.
+
+      **Why these tools scale.** Filters are *streaming*: they hold one line or a
+      small window, not the whole file, so they handle inputs bigger than RAM.
+      The exception is `sort`, which must see everything — it does an external
+      merge sort, spilling temp runs to `$TMPDIR` when data exceeds memory. And
+      sort order isn't ASCII by default: it follows the locale's `LC_COLLATE`, so
+      `LC_ALL=C sort` gives the classic byte-order sort and runs much faster.
+    cards:
+      - front: "Build a pipeline that lists the most frequent values in a file."
+        back: "`sort file | uniq -c | sort -rn` — `uniq -c` needs sorted input; the final `sort -rn` ranks by count."
+      - front: "How do you extract just the usernames from /etc/passwd?"
+        back: "`cut -d: -f1 /etc/passwd` — split on `:` and take field 1."
+      - front: "Which command follows a log file as new lines are written?"
+        back: "`tail -f <file>`"
+      - cloze: "`grep {{c1::-i}}` makes the search case-insensitive and `grep {{c2::-r}}` searches recursively."
+      - cloze: "The stream editor `{{c1::sed}}` with `s/old/new/g` replaces all occurrences on each line."
+    feynman:
+      - "Why must input be sorted before `uniq` can collapse duplicates?"
+      - "Explain how a pipe `|` connects two commands."
+    labs:
+      - title: "Top talkers in a log"
+        slug: lab-top-talkers
+        difficulty: core
+        est_minutes: 20
+        scenario: |
+          You have an access log where each line starts with a client IP. You
+          need the 5 IPs making the most requests.
+        deliverable: |
+          A single one-line pipeline that prints the top 5 client IPs by request
+          count, most frequent first. Explain each stage.
+        hints: |
+          - First field: `awk '{print $1}'` or `cut -d' ' -f1`
+          - Then `sort | uniq -c | sort -rn | head -5`
+        solution: |
+          ```bash
+          awk '{print $1}' access.log | sort | uniq -c | sort -rn | head -5
+          ```
+          `awk` pulls the IP, `sort` groups them, `uniq -c` counts each, the
+          second `sort -rn` ranks by count, `head -5` keeps the top five.
+
+  - title: "Manage processes"
+    slug: processes
+    order: 3
+    est_minutes: 22
+    summary: "Viewing, prioritising, signalling, and backgrounding processes."
+    body: |
+      ## Seeing what's running
+
+      ```bash
+      ps aux              # snapshot of all processes
+      ps -ef              # same idea, different format
+      top                 # live, interactive
+      htop                # nicer top (if installed)
+      pgrep -a nginx      # find PIDs by name
+      ```
+
+      ### Signals and killing
+
+      A signal asks a process to do something. The common ones:
+
+      | Signal | Number | Meaning |
+      |--------|--------|---------|
+      | TERM   | 15     | Polite "please stop" (default) |
+      | KILL   | 9      | Force kill (can't be caught) |
+      | HUP    | 1      | Hang up / reload config |
+
+      ```bash
+      kill 1234           # send TERM to PID 1234
+      kill -9 1234        # force kill
+      pkill nginx         # by name
+      kill -HUP $(pgrep -f myapp)   # reload
+      ```
+
+      ### Jobs: foreground and background
+
+      ```bash
+      sleep 300 &         # run in background
+      jobs                # list this shell's jobs
+      fg %1               # bring job 1 to foreground
+      Ctrl-Z              # suspend the foreground job
+      bg %1               # resume it in the background
+      nohup ./run.sh &    # keep running after logout
+      ```
+
+      ### Priorities
+
+      ```bash
+      nice -n 10 ./batch.sh      # start with lower priority
+      renice -n 5 -p 1234        # change a running process's niceness
+      ```
+    deep_dive: |
+      ### Processes, signals, and scheduling under the hood
+
+      **What a process really is.** The kernel tracks each one in a `task_struct`
+      and gives it a virtual address space (its own view of memory via the MMU), a
+      table of file descriptors, and credentials (UID/GID). A new process is born
+      with **`fork()`** (clone the caller) and then usually **`exec()`** (replace
+      its memory image with a new program) — the fork-exec pair every shell uses to
+      launch a command.
+
+      **Signals are software interrupts.** Sending a signal sets a pending bit on
+      the target's `task_struct`; the kernel delivers it when that process is next
+      scheduled. The process can install a **handler**, ignore it, or take the
+      default action — *except* SIGKILL(9) and SIGSTOP, which the kernel enforces
+      directly so a wedged or hostile process can't trap them. That's why `kill -9`
+      always works but skips cleanup (no handler runs, buffers aren't flushed),
+      while SIGTERM(15) is "polite" precisely because a handler *can* run to shut
+      down gracefully.
+
+      **Zombies and orphans.** On exit, a process becomes a **zombie** until its
+      parent calls `wait()` to read its exit code. If the parent dies first the
+      child is **reparented to PID 1**, which reaps it — one of systemd's jobs.
+
+      **Limited Direct Execution — how the OS stays in charge.** Your code runs
+      *directly* on the CPU for full speed, so how does the OS keep control? Two
+      pieces of hardware help (OSTEP's "limited direct execution"). First, the CPU
+      has a **user mode** and a **kernel mode**; a process can't do I/O or touch
+      another's memory in user mode. To request a privileged service it executes a
+      **trap** instruction, which jumps through a kernel-defined *trap table* into
+      the kernel, runs the work, and then does a **return-from-trap** back to user
+      code — this is exactly what a *system call* is. Second, the kernel programs a
+      **timer interrupt** at boot; every few milliseconds it fires, forcibly
+      handing the CPU back to the scheduler. That timer is why a CPU-bound infinite
+      loop can't freeze a modern box — the OS always gets the CPU back and can
+      **context switch** (save this task's registers to its kernel stack, restore
+      another's).
+
+      **Scheduling: response time vs turnaround.** Two metrics pull in opposite
+      directions: *turnaround* (finish − arrival) rewards running jobs to
+      completion, while *response* (first-run − arrival) rewards switching often so
+      interactive work feels snappy. Plain **FIFO** suffers the *convoy effect* — one
+      long job stalls everything behind it. **SJF/STCF** (shortest-job-first)
+      minimizes turnaround but needs to know job lengths and can starve long jobs.
+      **Round-robin** time-slices to win on response but hurts turnaround.
+
+      **MLFQ and Linux's CFS.** The **Multi-Level Feedback Queue** gets both
+      without knowing job lengths: several priority queues, new jobs start at the
+      top; use a whole slice → demoted (CPU-bound work sinks), give up the CPU
+      early → stay high (I/O-bound work floats), and a periodic *boost* refloats
+      everyone so nothing starves. Linux's **CFS** instead chases fairness: it
+      tracks each task's **virtual runtime** and always runs whoever has the least,
+      so the CPU is shared proportionally. **Nice** (-20…+19) just weights how fast
+      vruntime accrues — a hint, not a hard cap; `renice` changes it live, and only
+      root may *lower* niceness (raise priority).
+    cards:
+      - front: "What is the difference between SIGTERM (15) and SIGKILL (9)?"
+        back: "TERM politely asks a process to terminate (it can clean up or ignore it); KILL forcibly stops it and cannot be caught or ignored."
+      - front: "How do you keep a command running after you log out?"
+        back: "`nohup ./cmd &` (or use a terminal multiplexer / systemd service)."
+      - front: "Which signal is conventionally used to make a daemon reload its config?"
+        back: "SIGHUP (1) — `kill -HUP <pid>`."
+      - cloze: "Suspend the foreground job with `{{c1::Ctrl-Z}}`, then resume it in the background with `{{c2::bg}}`."
+    feynman:
+      - "Explain when you should reach for `kill -9` and why it's a last resort."
+    labs:
+      - title: "Wrangle a runaway process"
+        slug: lab-runaway-process
+        difficulty: core
+        est_minutes: 20
+        scenario: |
+          A script is eating CPU. You must identify it, try to stop it gracefully,
+          and only force-kill if it ignores you — without taking down anything else.
+        deliverable: |
+          1. Start a busy process: `yes > /dev/null &`
+          2. Find its PID by name.
+          3. Lower its priority (renice).
+          4. Send it a graceful TERM; if it survives, force-kill it.
+          5. Confirm it's gone.
+        hints: |
+          - `pgrep -a yes`
+          - `renice`, `kill`, `kill -9`
+          - Confirm with `pgrep yes` (no output = gone)
+        solution: |
+          ```bash
+          yes > /dev/null &
+          pid=$(pgrep -n yes)
+          sudo renice -n 15 -p "$pid"
+          kill "$pid"; sleep 1
+          pgrep yes && kill -9 "$pid"
+          pgrep yes || echo "gone"
+          ```
+
+  - title: "Edit files with vi/vim (and nano)"
+    slug: editing-files
+    order: 4
+    est_minutes: 24
+    summary: "Survive and thrive in vi — the editor that's on every Linux box — plus nano for quick edits."
+    body: |
+      ## Why vi/vim matters
+
+      `vi` (or `vim`) is on **every** Unix system, even a broken one with no GUI
+      and no extras. The LPIC exam tests it, and one day you'll edit a config on a
+      server where nano isn't installed. Learn the survival set.
+
+      ## vi's modes — the key idea
+
+      vi is **modal**. You're either issuing commands or typing text:
+
+      - **Normal mode** (default) — keys are commands (move, delete, etc.).
+      - **Insert mode** — keys type text. Enter with `i`; leave with `Esc`.
+      - **Command-line mode** — `:` for save/quit/search-replace.
+
+      ## The survival kit
+
+      ```
+      i        insert before cursor      Esc   back to normal mode
+      a        append after cursor       x     delete a character
+      dd       delete (cut) a line       yy    yank (copy) a line
+      p        paste                     u     undo      Ctrl-r  redo
+      /text    search forwards          n     next match
+      :w       save                     :q    quit      :wq  save+quit
+      :q!      quit WITHOUT saving       :%s/old/new/g   replace all
+      ```
+
+      **The #1 beginner trap:** you open vi, start typing, and nothing works —
+      because you're in normal mode. Press `i` first; press `Esc` then `:wq` to
+      save and quit. Stuck? `Esc` then `:q!` always bails out.
+
+      ## nano — the easy alternative
+
+      ```bash
+      nano file        # shortcuts shown at the bottom: ^ = Ctrl
+      # ^O write out (save), ^X exit, ^W search
+      ```
+      Great for quick edits when it's installed — but don't rely on it being there.
+    deep_dive: |
+      ### Terminal modes, swap files, and the frozen-vi mystery
+
+      **Modal editing needs raw terminal mode.** Normally the terminal driver is
+      in *canonical (cooked)* mode: it buffers a whole line, lets you backspace,
+      echoes keystrokes, and only hands the line over when you press Enter. vi
+      can't work that way — it must react to a single `j` or `Esc` instantly. So
+      on startup it uses `termios` to switch the TTY into *raw* mode (no line
+      buffering, no echo) and draws every character itself. On exit it restores
+      the old settings — which is why a crashed vi can leave your terminal mute
+      and garbled until you blindly type `reset`.
+
+      **The swap file is a crash journal.** vim doesn't edit in place; it loads
+      the file into memory and records changes in a hidden `.swp` file as you go.
+      If the editor or machine dies, that swap recovers unsaved work (`vim -r`).
+      On `:w` it typically writes a new copy and `rename()`s it over the original
+      — an atomic swap, so a power cut never leaves a half-written file. A stale
+      `.swp` is also why vim warns "swap file already exists".
+
+      **Why vi seems to "freeze."** Press `Ctrl-S` by reflex and the terminal
+      sends XOFF — software flow control telling the driver to *stop output*. The
+      editor is fine; the screen is paused. `Ctrl-Q` (XON) resumes it. This
+      legacy serial-line feature traps countless beginners who think vim hung.
+    cards:
+      - front: "vi is 'modal' — name the three modes and how you move between them."
+        back: "Normal (commands; default), Insert (typing; enter with `i`, leave with `Esc`), Command-line (`:` for save/quit/search). Esc always returns to Normal."
+      - front: "How do you save and quit vi? And quit without saving?"
+        back: "`:wq` (or `:x`/`ZZ`) saves and quits; `:q!` quits discarding changes."
+      - front: "In vi normal mode, what do `dd`, `yy`, and `p` do?"
+        back: "`dd` deletes (cuts) the current line, `yy` yanks (copies) it, `p` pastes."
+      - cloze: "Enter insert mode with `{{c1::i}}`, return to normal mode with `{{c2::Esc}}`, and replace all matches with `:%s/old/new/{{c3::g}}`."
+      - cloze: "In nano the save shortcut is `{{c1::Ctrl-O}}` (^O) and exit is `{{c2::Ctrl-X}}` (^X)."
+    feynman:
+      - "Explain vi's modal design to someone used to Notepad — why isn't typing immediate?"
+    labs:
+      - title: "vim survival drill"
+        slug: lab-vim-survival
+        difficulty: core
+        est_minutes: 18
+        scenario: |
+          You're on a minimal server (no nano) and must edit a config file in vi
+          without panicking.
+        deliverable: |
+          Using only vi, do all of these and note the exact keystrokes:
+          1. Open a new file, type three lines, and save+quit.
+          2. Reopen it, duplicate the second line (yank+paste).
+          3. Delete the first line.
+          4. Replace every occurrence of "dev" with "prod" in one command.
+          5. Quit without saving a deliberate mistake.
+        hints: |
+          - i / Esc / :wq ; yy + p ; dd ; :%s/dev/prod/g ; :q!
+        solution: |
+          ```
+          vim notes.txt
+          i  <type 3 lines>  Esc  :wq
+          vim notes.txt
+          (cursor on line 2)  yy  p          # duplicate line 2
+          (cursor on line 1)  dd             # delete line 1
+          :%s/dev/prod/g                     # replace all
+          (make a stray edit)  Esc  :q!      # bail without saving
+          ```
+
+  - title: "Redirection, pipes and tee"
+    slug: redirection
+    order: 5
+    est_minutes: 20
+    summary: "Wire commands' input/output together: stdin/stdout/stderr, files, pipes, and here-docs."
+    body: |
+      ## Three standard streams
+
+      Every process has three default channels, by **file descriptor**:
+
+      | FD | Name | Default |
+      |----|------|---------|
+      | 0 | stdin | keyboard |
+      | 1 | stdout | terminal |
+      | 2 | stderr | terminal |
+
+      ## Redirecting to/from files
+
+      ```bash
+      cmd > out.txt        # stdout → file (overwrite)
+      cmd >> out.txt       # stdout → file (append)
+      cmd 2> err.txt       # stderr → file
+      cmd > out.txt 2>&1   # stdout AND stderr → same file
+      cmd &> all.txt       # shorthand for both (bash)
+      cmd < in.txt         # feed file as stdin
+      cmd 2>/dev/null      # discard errors
+      ```
+
+      The order matters: `> out 2>&1` means "send stdout to out, then point
+      stderr wherever stdout currently goes."
+
+      ## Pipes and tee
+
+      A **pipe** `|` connects one command's stdout to the next's stdin:
+
+      ```bash
+      ps aux | grep nginx | wc -l
+      ```
+
+      **`tee`** splits a stream — write to a file *and* keep it flowing:
+
+      ```bash
+      make 2>&1 | tee build.log        # watch output and save it
+      echo "text" | sudo tee /etc/file # write to a root-owned file via a pipe
+      ```
+
+      ## Here-documents
+
+      Feed a multi-line block as stdin:
+
+      ```bash
+      cat > note.txt <<'EOF'
+      line one
+      line two
+      EOF
+      ```
+    deep_dive: |
+      ### File descriptors: what redirection actually rewires
+
+      **Every open file is a small integer.** The kernel keeps a per-process
+      *file-descriptor table*; slots 0/1/2 are just the first three, by
+      convention stdin/stdout/stderr. "Redirection" is the shell editing that
+      table in the **child**, in the gap between `fork()` and `exec()`: it
+      `open()`s the target file and uses `dup2()` to make fd 1 (or 2) point at it,
+      *then* execs your command — which writes to fd 1 none the wiser.
+
+      **Why order matters in `>out 2>&1`.** `2>&1` means "make fd 2 a copy of
+      *whatever fd 1 currently is*." So `>out 2>&1` first points fd 1 at the file,
+      then copies that — both streams reach `out`. Reverse it (`2>&1 >out`) and
+      fd 2 is copied from fd 1 while it's still the terminal, so errors stay on
+      screen and only stdout reaches the file. Same tokens, opposite result,
+      purely because the shell applies them left to right.
+
+      **The rest, demystified.** `/dev/null` is a character device whose driver
+      discards all writes and returns EOF on read — a bottomless sink. A pipe
+      swaps the file for the kernel pipe buffer. And `<<EOF` here-docs aren't
+      magic: the shell writes the block to a temporary file (or pipe) and
+      redirects it onto stdin, so the program reads it exactly like typed input.
+    cards:
+      - front: "What are file descriptors 0, 1, and 2?"
+        back: "0 = stdin, 1 = stdout, 2 = stderr."
+      - front: "How do you send both stdout and stderr to the same file?"
+        back: "`cmd > file 2>&1` (or `cmd &> file` in bash). 2>&1 means 'stderr goes where stdout currently points'."
+      - front: "What does `tee` do, and why pipe to `sudo tee` to write a root file?"
+        back: "`tee` writes its stdin to a file AND passes it on. `... | sudo tee /etc/x` works because the *redirection* would otherwise happen as your user; tee runs as root and does the write."
+      - front: "Difference between `>` and `>>`?"
+        back: "`>` overwrites the file; `>>` appends to it."
+      - cloze: "`cmd 2>/dev/null` discards {{c1::stderr}}, and `cmd | tee file` both shows output and writes it to {{c2::file}}."
+    feynman:
+      - "Explain why `echo x > /etc/file` fails with permission denied even under sudo, but `echo x | sudo tee /etc/file` works."
+    labs:
+      - title: "Capture a noisy build"
+        slug: lab-redirection
+        difficulty: core
+        est_minutes: 15
+        scenario: |
+          A command prints useful output and errors mixed together. You want to
+          watch it live, save everything to a log, and separately keep only the
+          errors.
+        deliverable: |
+          1. Run a command so its stdout+stderr both appear on screen AND go to
+             build.log.
+          2. Run it again saving ONLY stderr to errors.log, discarding stdout.
+          3. Append a timestamp line to build.log without overwriting it.
+        hints: |
+          - tee with 2>&1 ; 2> + 1>/dev/null ; >>
+        solution: |
+          ```bash
+          ./build.sh 2>&1 | tee build.log
+          ./build.sh 1>/dev/null 2> errors.log
+          date >> build.log
+          ```
+
+  - title: "Terminal multiplexers (screen & tmux)"
+    slug: multiplexers
+    order: 6
+    est_minutes: 16
+    summary: "Keep sessions alive across disconnects and run multiple shells in one terminal."
+    body: |
+      ## The problem they solve
+
+      Run a long job over SSH, lose your connection → the job dies (its terminal
+      vanished). A **multiplexer** runs your shells in a session that keeps living
+      on the server; you **detach** and **reattach** at will.
+
+      ## tmux (modern)
+
+      ```bash
+      tmux                 # start a session
+      tmux new -s deploy   # named session
+      # prefix key is Ctrl-b, then:
+      #   d   detach (session keeps running)
+      #   c   new window      n / p  next / prev window
+      #   %   split vertically  "  split horizontally
+      tmux ls              # list sessions
+      tmux attach -t deploy
+      ```
+
+      ## screen (classic, often pre-installed)
+
+      ```bash
+      screen -S deploy     # start named
+      # prefix is Ctrl-a, then:  d detach, c new window
+      screen -ls           # list
+      screen -r deploy     # reattach
+      ```
+
+      Use case: start `tmux`, kick off a migration, detach, close your laptop —
+      reconnect tomorrow and `tmux attach` to find it still running.
+    deep_dive: |
+      ### How a session survives a dropped connection
+
+      **The killer is SIGHUP.** Your shell and its children share a *controlling
+      terminal*. When SSH drops, the kernel sees the terminal's master side close
+      and sends **SIGHUP** ("hang up", a relic of modems) to the foreground
+      process group — whose default action is to die. That's why a naked long job
+      vanishes with the connection. `nohup` and `disown` dodge it for a single
+      job; a multiplexer solves it more completely.
+
+      **What tmux/screen actually do.** They run a long-lived *server* that owns a
+      **pseudo-terminal (PTY)** — a kernel-emulated terminal as a master/slave
+      pair under `/dev/pts`. Your shells use the PTY slave as their controlling
+      terminal, not the SSH link. When you "detach," the client just stops drawing
+      the PTY; the server and its children keep running, reparented to PID 1 and
+      insulated from the SSH SIGHUP. "Attach" is a new client connecting back to
+      that same PTY and re-rendering its screen buffer.
+
+      **The prefix key, explained.** `Ctrl-b` (tmux) or `Ctrl-a` (screen) exists
+      because the multiplexer sits *between* your keyboard and the inner shell. It
+      reserves one keystroke to mean "the next key is for me, not the program,"
+      so it can intercept commands without colliding with the apps inside — which
+      is also why `Ctrl-a` (start of line) feels off inside screen until you press
+      it twice.
+    cards:
+      - front: "What problem do screen/tmux solve?"
+        back: "They keep shell sessions alive on the server across disconnects — you detach and reattach, so long jobs survive an SSH drop. They also split one terminal into many."
+      - front: "In tmux, what's the default prefix key, and how do you detach?"
+        back: "Prefix is `Ctrl-b`; detach with prefix then `d`. Reattach with `tmux attach -t <name>`."
+      - cloze: "tmux's prefix key is `Ctrl-{{c1::b}}` while screen's is `Ctrl-{{c2::a}}`; both detach with the prefix then `{{c3::d}}`."
+    feynman:
+      - "Explain why a job started in a plain SSH shell dies on disconnect but a tmux one survives."
+    labs:
+      - title: "Survive a disconnect"
+        slug: lab-tmux
+        difficulty: intro
+        est_minutes: 12
+        scenario: |
+          You must run a long task on a remote server and be able to close your
+          laptop without killing it.
+        deliverable: |
+          1. Start a named tmux session.
+          2. Run a long-running command (e.g. `ping localhost`).
+          3. Detach, then list sessions, then reattach and confirm it kept running.
+        hints: |
+          - tmux new -s ; Ctrl-b d ; tmux ls ; tmux attach -t
+        solution: |
+          ```bash
+          tmux new -s longjob
+          ping localhost            # (inside the session)
+          # press Ctrl-b then d  -> detached
+          tmux ls                   # longjob: 1 windows ...
+          tmux attach -t longjob    # still pinging
+          ```
+
+quiz:
+  title: "GNU & Unix Commands — chapter exam"
+  slug: lpic1-gnu-unix-exam
+  scope: chapter
+  description: "Command line, text filters, and process management."
+  questions:
+    - type: command
+      text: "Print only the first column (usernames) of /etc/passwd, which is colon-delimited."
+      explanation: "`cut -d: -f1` selects field 1 with `:` as the delimiter."
+      answers:
+        - "cut -d: -f1 /etc/passwd"
+        - {value: "cut -d ?':' ?-f ?1 /etc/passwd", match: regex}
+    - type: command
+      text: "Follow (live-tail) the file /var/log/syslog."
+      explanation: "`tail -f` follows a file as it grows."
+      answers:
+        - "tail -f /var/log/syslog"
+    - type: mcq
+      text: "Which signal forcibly terminates a process and cannot be caught?"
+      explanation: "SIGKILL (9) is uncatchable; the kernel kills the process outright."
+      choices:
+        - {text: "SIGKILL (9)", correct: true}
+        - {text: "SIGTERM (15)"}
+        - {text: "SIGHUP (1)"}
+        - {text: "SIGINT (2)"}
+    - type: mcq
+      text: "Why must you `sort` before `uniq -c`?"
+      explanation: "`uniq` only collapses *adjacent* duplicate lines, so identical lines must be next to each other first."
+      choices:
+        - {text: "uniq only collapses adjacent duplicate lines", correct: true}
+        - {text: "uniq cannot read large files"}
+        - {text: "sort removes duplicates by itself"}
+        - {text: "It is just a convention"}
+    - type: true_false
+      text: "`export VAR=value` makes VAR available to child processes."
+      explanation: "True — exporting promotes a shell variable to the environment, which children inherit."
+      choices:
+        - {text: "True", correct: true}
+        - {text: "False"}
+    - type: command
+      text: "Search recursively for the text TODO under the current directory."
+      explanation: "`grep -r TODO .` recurses from the current directory."
+      answers:
+        - {value: "grep -r ?TODO \\.?", match: regex}
+        - "grep -r TODO ."
+        - "grep -r TODO"

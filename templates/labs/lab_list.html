@@ -1,0 +1,31 @@
+{% extends 'base.html' %}
+{% block title %}Labs · Engram{% endblock %}
+{% block topbar %}Labs{% endblock %}
+{% block content %}
+<h1>🛠️ Labs</h1>
+<p class="subtitle">Hands-on mini-projects. Don't just recall — build, break, and reason like an engineer.</p>
+
+{% for row in rows %}
+  <div class="card">
+    <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
+      <div>
+        <h3 style="margin:0;"><a href="{{ row.lab.get_absolute_url }}">{{ row.lab.title }}</a>
+          <span class="tag-diff {{ row.lab.difficulty }}">{{ row.lab.get_difficulty_display }}</span></h3>
+        <div class="muted" style="font-size:13px;">
+          {% if row.lab.course_obj %}{{ row.lab.course_obj.name }} · {% endif %}~{{ row.lab.est_minutes }} min
+        </div>
+      </div>
+      <div>
+        {% if row.attempt %}
+          <span class="badge {% if row.attempt.status == 'done' %}emerald{% elif row.attempt.status == 'in_progress' %}amber{% else %}slate{% endif %}">{{ row.attempt.get_status_display }}</span>
+        {% else %}
+          <span class="badge slate">Not started</span>
+        {% endif %}
+      </div>
+    </div>
+    <p class="muted" style="margin:8px 0 0;">{{ row.lab.scenario_md|truncatewords:28 }}</p>
+  </div>
+{% empty %}
+  <div class="empty">No labs loaded yet. Run <code>python manage.py seed_content</code>.</div>
+{% endfor %}
+{% endblock %}

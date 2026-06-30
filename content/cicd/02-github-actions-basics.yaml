@@ -1,0 +1,184 @@
+chapter:
+  title: "GitHub Actions Basics"
+  slug: github-actions-basics
+  order: 2
+  summary: "Write workflows: events, jobs, steps, and reusable actions."
+
+lessons:
+  - title: "Workflows, jobs, and steps"
+    slug: workflows-jobs-steps
+    order: 1
+    est_minutes: 22
+    summary: "The anatomy of a GitHub Actions workflow file and how it runs."
+    body: |
+      ## A first workflow
+
+      Workflows live in `.github/workflows/*.yml`:
+
+      ```yaml
+      name: CI
+      on:                      # events that trigger this workflow
+        push:
+          branches: [main]
+        pull_request:
+
+      jobs:
+        test:                  # a job runs on its own runner
+          runs-on: ubuntu-latest
+          steps:
+            - uses: actions/checkout@v4        # a reusable action: get the code
+            - uses: actions/setup-python@v5
+              with:
+                python-version: "3.12"
+            - run: pip install -r requirements.txt   # a shell step
+            - run: pytest -q
+      ```
+
+      ## The vocabulary
+
+      | Term | Meaning |
+      |------|---------|
+      | **workflow** | the whole `.yml` automation file |
+      | **event** (`on:`) | what triggers it (push, pull_request, schedule, tag…) |
+      | **job** | a set of steps on one runner; jobs run in parallel by default |
+      | **step** | one task: either `run:` (shell) or `uses:` (an action) |
+      | **action** | a reusable, shareable step (from the Marketplace or yours) |
+      | **runner** | the machine that executes a job |
+
+      ## Ordering and dependencies
+
+      ```yaml
+      jobs:
+        build: { runs-on: ubuntu-latest, steps: [...] }
+        deploy:
+          needs: build          # wait for build to succeed
+          runs-on: ubuntu-latest
+          steps: [...]
+      ```
+    deep_dive: |
+      ### From a git push to a running step
+
+      Workflows feel declarative, so it helps to trace the actual machinery:
+
+      1. You push (or open a PR). GitHub emits an **event** with a rich payload
+         (the ref, the commit SHA, the actor, the changed files…).
+      2. GitHub scans `.github/workflows/` **at that commit** and finds workflows
+         whose `on:` matches the event. (The workflow that runs is the version *in
+         the branch being pushed* — which is why CI changes take effect on the
+         branch that contains them.)
+      3. For each matched workflow it creates a **run**, expands the jobs into the
+         dependency graph (`needs:`), and queues independent jobs.
+      4. A **runner** picks up a job, provisions a clean VM/container, and the
+         **first thing you almost always do is `actions/checkout`** — because the
+         runner starts *empty*; your code isn't there until you check it out.
+      5. Each step runs in order in the same job; `run:` steps execute in a shell,
+         `uses:` steps run a packaged **action** (itself often a container or a JS
+         program). Steps in a job share the filesystem and can pass data via
+         **outputs** and the environment; steps in *different* jobs do not (separate
+         runners) — they must use artifacts/cache.
+
+      **Contexts and expressions** (`${{ github.sha }}`, `${{ secrets.TOKEN }}`,
+      `${{ matrix.version }}`) are how the YAML reaches the event payload, secrets,
+      and job config at runtime. The engine substitutes them before running the
+      step.
+
+      **Actions are just reuse.** `uses: actions/checkout@v4` pins a published action
+      at a ref/tag (or a digest, for supply-chain safety). It's the same
+      content-addressing/versioning lesson as Docker images and Git tags: prefer
+      pinning third-party actions to a commit SHA so a re-tagged action can't change
+      what your pipeline runs. Under the hood an action is just code the runner
+      executes with your inputs (`with:`), so a workflow is really "orchestrate a
+      sequence of small programs in a clean box, wired to the git event."
+    cards:
+      - front: "Where do GitHub Actions workflows live, and what triggers them?"
+        back: "In `.github/workflows/*.yml`; the `on:` key lists triggering events (push, pull_request, schedule, tag, etc.)."
+      - front: "workflow → job → step: what's each?"
+        back: "A workflow is the whole .yml; a job is a set of steps on one runner (jobs run in parallel by default); a step is one task — `run:` (shell) or `uses:` (a reusable action)."
+      - front: "Why is `actions/checkout` almost always the first step?"
+        back: "The runner starts as a clean, empty environment — your repository isn't present until you check it out."
+      - front: "How do you make one job wait for another?"
+        back: "`needs: <job>` — it runs only after that job succeeds (this builds the job DAG)."
+      - front: "Why pin a third-party action to a commit SHA rather than a moving tag?"
+        back: "Tags are mutable; pinning to a digest/SHA ensures the action can't be re-pointed to different (possibly malicious) code — supply-chain safety."
+      - cloze: "Steps in the same job share a filesystem; steps in {{c1::different}} jobs run on separate runners and must pass data via {{c2::artifacts/cache}}."
+    feynman:
+      - "Trace what happens from `git push` to a `pytest` step executing on a runner."
+      - "Why must you check out your code in a workflow — isn't it already there?"
+    labs:
+      - title: "Write your first CI workflow"
+        slug: lab-first-workflow
+        difficulty: core
+        est_minutes: 22
+        scenario: |
+          A Python repo has tests but nothing runs them on push. Add CI.
+        deliverable: |
+          Write `.github/workflows/ci.yml` that, on push to main and on PRs:
+          1. Checks out the code.
+          2. Sets up Python 3.12.
+          3. Installs dependencies.
+          4. Runs the linter and the tests.
+          Then explain how a failing test would block a PR merge.
+        hints: |
+          - actions/checkout@v4, actions/setup-python@v5, run: steps
+        solution: |
+          ```yaml
+          name: CI
+          on:
+            push: { branches: [main] }
+            pull_request:
+          jobs:
+            test:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: actions/checkout@v4
+                - uses: actions/setup-python@v5
+                  with: { python-version: "3.12" }
+                - run: pip install -r requirements.txt
+                - run: ruff check .
+                - run: pytest -q
+          ```
+          A failing `pytest` returns non-zero → the job fails → the PR's required
+          check is red → branch protection blocks the merge.
+
+quiz:
+  title: "GitHub Actions Basics — chapter exam"
+  slug: cicd-actions-basics-exam
+  scope: chapter
+  description: "Workflow structure and execution."
+  questions:
+    - type: mcq
+      text: "Which directory holds GitHub Actions workflow files?"
+      explanation: "`.github/workflows/`."
+      choices:
+        - {text: ".github/workflows/", correct: true}
+        - {text: ".git/hooks/"}
+        - {text: "ci/"}
+        - {text: ".github/actions/"}
+    - type: mcq
+      text: "Why is `actions/checkout` typically the first step?"
+      explanation: "The runner starts empty; your code isn't present until checked out."
+      choices:
+        - {text: "The runner starts empty, so you must fetch the code", correct: true}
+        - {text: "It installs Python"}
+        - {text: "It deploys the app"}
+        - {text: "It is required to publish logs"}
+    - type: command
+      text: "In a workflow job, what key makes a 'deploy' job wait for a 'build' job?"
+      explanation: "`needs: build` creates the dependency."
+      answers:
+        - {value: "needs: build", match: regex}
+        - {value: "needs:\\s*build", match: regex}
+    - type: true_false
+      text: "By default, separate jobs in a workflow run in parallel."
+      explanation: "True — unless linked with needs:."
+      choices:
+        - {text: "True", correct: true}
+        - {text: "False"}
+    - type: mcq
+      text: "A step using `uses: actions/checkout@v4` is an example of...?"
+      explanation: "A reusable action pinned to a ref."
+      choices:
+        - {text: "A reusable action", correct: true}
+        - {text: "A shell command"}
+        - {text: "An environment variable"}
+        - {text: "A secret"}

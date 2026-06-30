@@ -1,0 +1,270 @@
+chapter:
+  title: "IP Addressing and Subnetting"
+  slug: ip-addressing-subnetting
+  order: 2
+  summary: "IPv4 addresses, CIDR, private ranges, and how to carve a network into subnets."
+
+lessons:
+  - title: "IPv4 addresses, classes, and private ranges"
+    slug: ipv4-basics
+    order: 1
+    est_minutes: 22
+    summary: "What an IP address is, the role of the mask, and the addresses you'll see everywhere."
+    body: |
+      ## What an IPv4 address is
+
+      A 32-bit number written as four **octets** (0–255), e.g. `192.168.1.10`.
+      It splits into a **network part** and a **host part**, and the **subnet
+      mask** says where that split is.
+
+      ```
+      192.168.1.10   /24      mask 255.255.255.0
+      └── network ──┘└ host ┘
+      ```
+
+      `/24` is **CIDR notation**: the first 24 bits are network, leaving 8 bits
+      for hosts.
+
+      ## Private (RFC 1918) ranges — memorise these
+
+      | Range | CIDR | Size |
+      |-------|------|------|
+      | 10.0.0.0 – 10.255.255.255 | 10.0.0.0/8 | huge |
+      | 172.16.0.0 – 172.31.255.255 | 172.16.0.0/12 | medium |
+      | 192.168.0.0 – 192.168.255.255 | 192.168.0.0/16 | small |
+
+      These aren't routable on the public internet — that's why your home router
+      hands out `192.168.x.x` and uses **NAT** to share one public IP.
+
+      ## Special addresses
+
+      - `127.0.0.1` — loopback (this machine).
+      - `169.254.x.x` — APIPA / link-local (you got *no* DHCP lease).
+      - In any subnet: the **first** address is the network ID, the **last** is
+        the broadcast — neither is usable by a host.
+    deep_dive: |
+      ### Why an address split needs a mask, and how NAT rewrites it
+
+      An IPv4 address is **32 bits**; humans read it as four 8-bit octets. There's
+      nothing in the address itself that says where "network" ends and "host"
+      begins — that's *entirely* the job of the **mask**. The mask is a run of 1s
+      then 0s; the router computes `address AND mask` to get the **network number**.
+      So `192.168.1.10/24` AND `255.255.255.0` = `192.168.1.0` — same network as
+      `192.168.1.99`, different from `192.168.2.10`. "Same subnet" literally means
+      "same result after the bitwise AND," which is also how a host decides whether
+      to deliver a packet **locally** (ARP for the MAC) or **send it to the
+      gateway** (different network → route off-link).
+
+      **Why private ranges + NAT exist.** IPv4 has only ~4.3 billion addresses —
+      far fewer than devices. RFC 1918 carved out ranges that are **not routed on
+      the public internet**, so everyone can reuse `192.168.x.x` internally. **NAT**
+      (Network Address Translation) on your router rewrites the **source IP** of
+      outbound packets from your private address to its single public address, and
+      records the mapping in a translation table. More precisely it's usually **PAT**
+      (port address translation): the router also rewrites the source *port* and
+      keys the table on `(srcIP, srcPort)` so replies for many internal hosts
+      sharing one public IP can be demultiplexed back to the right device. When a
+      reply arrives, the router looks up the table, rewrites the destination back to
+      the private IP/port, and forwards it inside. That's why inbound connections
+      "just don't work" without port-forwarding — there's no table entry until an
+      inside host starts the conversation.
+
+      This ties straight to containers: Docker's bridge networking does exactly this
+      NAT/PAT dance to give containers private IPs that reach the internet through
+      the host (Docker networking lesson).
+    cards:
+      - front: "What does the subnet mask tell you about an IP address?"
+        back: "Where the network portion ends and the host portion begins (how many leading bits are the network)."
+      - front: "List the three RFC 1918 private ranges."
+        back: "10.0.0.0/8, 172.16.0.0/12, and 192.168.0.0/16."
+      - front: "What does an address in 169.254.x.x indicate?"
+        back: "APIPA / link-local — the host failed to get a DHCP lease."
+      - cloze: "`127.0.0.1` is the {{c1::loopback}} address, meaning {{c2::this machine}}."
+      - cloze: "In any subnet, the first address is the {{c1::network ID}} and the last is the {{c2::broadcast}}, so neither is assignable to a host."
+    feynman:
+      - "Explain why private addresses need NAT to reach the internet."
+      - "Why are the first and last addresses of a subnet not usable by hosts?"
+    labs:
+      - title: "Classify these addresses"
+        slug: lab-classify-addresses
+        difficulty: intro
+        est_minutes: 12
+        scenario: |
+          You're auditing a network and need to quickly classify addresses.
+        deliverable: |
+          For each, say public or private, and note anything special:
+          1. 10.4.5.6
+          2. 8.8.8.8
+          3. 172.20.1.1
+          4. 169.254.10.5
+          5. 192.168.0.1
+          6. 127.0.0.1
+        hints: |
+          - Compare against the RFC 1918 ranges; watch for loopback and APIPA.
+        solution: |
+          1. 10.4.5.6 → **private** (10.0.0.0/8)
+          2. 8.8.8.8 → **public** (Google DNS)
+          3. 172.20.1.1 → **private** (172.16.0.0/12)
+          4. 169.254.10.5 → **APIPA/link-local** (no DHCP lease)
+          5. 192.168.0.1 → **private** (192.168.0.0/16)
+          6. 127.0.0.1 → **loopback** (this host)
+
+  - title: "Subnetting and CIDR math"
+    slug: subnetting
+    order: 2
+    est_minutes: 30
+    summary: "Calculate hosts, network/broadcast addresses, and split a block into subnets."
+    body: |
+      ## The core formulas
+
+      For a prefix `/n` on IPv4 (32 bits total):
+
+      - **Host bits** `h = 32 − n`
+      - **Total addresses** = `2^h`
+      - **Usable hosts** = `2^h − 2` (subtract network + broadcast)
+
+      | CIDR | Mask | Hosts (usable) |
+      |------|------|----------------|
+      | /24  | 255.255.255.0   | 254 |
+      | /25  | 255.255.255.128 | 126 |
+      | /26  | 255.255.255.192 | 62  |
+      | /27  | 255.255.255.224 | 30  |
+      | /28  | 255.255.255.240 | 14  |
+      | /30  | 255.255.255.252 | 2   |
+
+      ## The "block size" trick
+
+      In the subnetted octet, **block size = 256 − mask value**. Subnets start at
+      multiples of the block size.
+
+      ### Worked example: subnet 192.168.10.0/24 into /26 networks
+
+      `/26` → mask `255.255.255.192` → block size `256 − 192 = 64`. So subnets
+      begin at 0, 64, 128, 192:
+
+      | Subnet | Network | First host | Last host | Broadcast |
+      |--------|---------|-----------|-----------|-----------|
+      | 1 | .0   | .1   | .62  | .63  |
+      | 2 | .64  | .65  | .126 | .127 |
+      | 3 | .128 | .129 | .190 | .191 |
+      | 4 | .192 | .193 | .254 | .255 |
+
+      Each `/26` gives `2^6 − 2 = 62` usable hosts.
+
+      ## Finding which subnet an IP is in
+
+      For `192.168.10.100/26`: block size 64, so the boundaries are 0/64/128/192.
+      100 falls between 64 and 127 → network `.64`, broadcast `.127`, host range
+      `.65–.126`.
+    deep_dive: |
+      ### Why the block-size trick works — it's just binary
+
+      An IPv4 address is **32 bits**. The mask is a run of 1s (network) followed by
+      0s (host); subnetting moves that boundary right, borrowing host bits to make
+      more networks.
+
+      Look at the octet where the boundary lands. A `/26` puts 2 network bits into
+      the last octet: `11000000` = **192**. Those 2 bits count 0,1,2,3 — four
+      subnets. The remaining 6 host bits only change *within* a block, so each block
+      spans `2^6 = 64` addresses. That's the **block size = 256 − 192 = 64**
+      shortcut: 256 is the whole octet, the mask value is what the network bits
+      "use up," and the difference is how far apart the subnet boundaries sit.
+
+      **Network vs broadcast at the bit level.** Within a block, set all host bits
+      to 0 → the **network address** (.0, .64, …); set them all to 1 → the
+      **broadcast** (.63, .127, …). Both are reserved: all-zeros *names the network
+      itself*, all-ones *means everyone here* — hence `2^h − 2` usable hosts.
+
+      **Finding an IP's subnet is a bitwise AND:** `IP AND mask = network`. For
+      192.168.10.100 /26, 100 = `01100100`; AND with `11000000` zeros the low 6
+      bits → `01000000` = 64, so .100 is in the .64 subnet. The block-size method
+      is just doing that AND in your head via the boundaries.
+    cards:
+      - front: "How many usable hosts are in a /26?"
+        back: "62. Host bits = 32−26 = 6, so 2^6 − 2 = 62 (minus network and broadcast)."
+      - front: "What is the 'block size' trick for subnetting?"
+        back: "block size = 256 − (mask value in the subnetted octet). Subnets start at multiples of the block size."
+      - front: "For 192.168.10.0/24 split into /26s, what are the four network addresses?"
+        back: ".0, .64, .128, .192 (block size 64)."
+      - cloze: "Usable hosts = 2^(32−prefix) − {{c1::2}}, subtracting the {{c2::network and broadcast}} addresses."
+      - cloze: "A /30 subnet has {{c1::2}} usable hosts — ideal for a point-to-point link."
+    feynman:
+      - "Explain the block-size method as if teaching a peer who panics at subnetting."
+      - "Why does every subnet 'lose' two addresses?"
+    labs:
+      - title: "Carve up a /24"
+        slug: lab-carve-subnets
+        difficulty: challenge
+        est_minutes: 30
+        scenario: |
+          You're given 172.16.20.0/24 for a small office and must split it into
+          4 equal subnets — one each for Staff, Guests, Servers, and Management.
+        deliverable: |
+          For each of the 4 subnets provide:
+          - CIDR notation and subnet mask
+          - Network address
+          - Usable host range
+          - Broadcast address
+          Then answer: which subnet is 172.16.20.200 in?
+        hints: |
+          - 4 equal subnets of a /24 → /26 (borrow 2 bits: 2^2 = 4).
+          - Block size = 256 − 192 = 64.
+        solution: |
+          4 subnets → /26, mask 255.255.255.192, block size 64.
+
+          | Subnet | CIDR | Network | Usable range | Broadcast |
+          |--------|------|---------|--------------|-----------|
+          | Staff | 172.16.20.0/26   | .0   | .1–.62   | .63  |
+          | Guests | 172.16.20.64/26 | .64  | .65–.126 | .127 |
+          | Servers | 172.16.20.128/26 | .128 | .129–.190 | .191 |
+          | Mgmt | 172.16.20.192/26  | .192 | .193–.254 | .255 |
+
+          172.16.20.200 is in the **Management** subnet (.192–.255).
+
+quiz:
+  title: "IP Addressing & Subnetting — chapter exam"
+  slug: netplus-subnetting-exam
+  scope: chapter
+  description: "IPv4, private ranges, and subnet math."
+  questions:
+    - type: mcq
+      text: "How many usable hosts does a /26 network provide?"
+      explanation: "2^(32-26) - 2 = 2^6 - 2 = 62."
+      choices:
+        - {text: "62", correct: true}
+        - {text: "64"}
+        - {text: "30"}
+        - {text: "126"}
+    - type: mcq
+      text: "Which of these is NOT a private (RFC 1918) range?"
+      explanation: "8.0.0.0/8 is public; the private ranges are 10/8, 172.16/12, 192.168/16."
+      choices:
+        - {text: "8.0.0.0/8", correct: true}
+        - {text: "10.0.0.0/8"}
+        - {text: "172.16.0.0/12"}
+        - {text: "192.168.0.0/16"}
+    - type: fill_in
+      text: "For 192.168.10.0/24 subnetted into /26, the broadcast address of the first subnet is 192.168.10.____."
+      explanation: "Block size 64 → first subnet .0–.63, broadcast .63."
+      answers:
+        - "63"
+    - type: true_false
+      text: "An address starting 169.254 usually means DHCP failed (APIPA)."
+      explanation: "True — link-local APIPA is self-assigned when no DHCP lease is obtained."
+      choices:
+        - {text: "True", correct: true}
+        - {text: "False"}
+    - type: mcq
+      text: "Which subnet does 10.0.0.130/25 belong to?"
+      explanation: "/25 block size = 128, boundaries .0 and .128; 130 is in the .128 subnet (.128–.255, usable .129–.254)."
+      choices:
+        - {text: "10.0.0.128/25", correct: true}
+        - {text: "10.0.0.0/25"}
+        - {text: "10.0.0.130/25"}
+        - {text: "10.0.0.64/25"}
+    - type: fill_in
+      text: "A point-to-point link between two routers typically uses a /__ subnet (2 usable hosts)."
+      explanation: "/30 gives exactly 2 usable hosts."
+      answers:
+        - "30"
+        - "/30"

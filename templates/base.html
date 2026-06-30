@@ -1,0 +1,59 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Engram{% endblock %}</title>
+  <link rel="stylesheet" href="{% static 'app.css' %}">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧭</text></svg>">
+</head>
+<body>
+{% if user.is_authenticated %}
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand"><span class="logo">🧭</span> Engram</div>
+    <nav class="nav">
+      <a href="{% url 'dashboard' %}" class="{% if request.resolver_match.url_name == 'dashboard' %}active{% endif %}"><span class="ico">🏠</span> Dashboard</a>
+      <a href="{% url 'session' %}" class="{% if request.resolver_match.url_name == 'session' %}active{% endif %}"><span class="ico">🎯</span> Today's session</a>
+      <a href="{% url 'review' %}" class="{% if request.resolver_match.app_name == 'recall' or request.resolver_match.url_name == 'review' %}active{% endif %}"><span class="ico">🔁</span> Review</a>
+      <a href="{% url 'feynman' %}" class="{% if request.resolver_match.url_name == 'feynman' %}active{% endif %}"><span class="ico">🗣️</span> Explain (Feynman)</a>
+      <a href="{% url 'quiz_list' %}" class="{% if 'quiz' in request.resolver_match.url_name or 'attempt' in request.resolver_match.url_name %}active{% endif %}"><span class="ico">📝</span> Exams</a>
+      <a href="{% url 'lab_list' %}" class="{% if 'lab' in request.resolver_match.url_name %}active{% endif %}"><span class="ico">🛠️</span> Labs</a>
+      <a href="{% url 'notes_all' %}" class="{% if request.resolver_match.url_name == 'notes_all' %}active{% endif %}"><span class="ico">📒</span> My notes</a>
+      <a href="{% url 'search' %}" class="{% if request.resolver_match.url_name == 'search' %}active{% endif %}"><span class="ico">🔎</span> Search</a>
+
+      <div class="nav-section">Courses</div>
+      {% for c in nav_courses %}
+        <a href="{{ c.get_absolute_url }}" class="{% if request.resolver_match.url_name == 'course_detail' and request.resolver_match.kwargs.course_slug == c.slug %}active{% endif %}"><span class="ico">{{ c.icon }}</span> {{ c.name }}</a>
+      {% empty %}
+        <a href="{% url 'course_list' %}"><span class="ico">📚</span> All courses</a>
+      {% endfor %}
+    </nav>
+  </aside>
+
+  <div class="main">
+    <div class="topbar">
+      <div class="title">{% block topbar %}{% endblock %}</div>
+      <div class="btn-row">
+        <form method="get" action="{% url 'search' %}" style="display:flex; align-items:center;">
+          <input type="text" name="q" value="{{ request.GET.q }}" placeholder="🔎 Search docs…"
+                 style="width:240px; padding:7px 11px;" aria-label="Search">
+        </form>
+        <a class="btn sm ghost" href="/admin/">Admin</a>
+        <form method="post" action="{% url 'logout' %}" style="display:inline">{% csrf_token %}
+          <button class="btn sm ghost" type="submit">Log out</button>
+        </form>
+      </div>
+    </div>
+    <div class="content">
+      {% if messages %}{% for m in messages %}<div class="flash-msg">{{ m }}</div>{% endfor %}{% endif %}
+      {% block content %}{% endblock %}
+    </div>
+  </div>
+</div>
+{% else %}
+  {% block content_anon %}{% endblock %}
+{% endif %}
+</body>
+</html>

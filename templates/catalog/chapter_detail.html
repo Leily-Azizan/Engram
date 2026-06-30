@@ -1,0 +1,65 @@
+{% extends 'base.html' %}
+{% load content_extras %}
+{% block title %}{{ chapter.title }} · Engram{% endblock %}
+{% block topbar %}{{ chapter.course.name }}{% endblock %}
+{% block content %}
+<div class="crumbs">
+  <a href="{% url 'course_list' %}">Courses</a> /
+  <a href="{{ chapter.course.get_absolute_url }}">{{ chapter.course.name }}</a> /
+  {{ chapter.title }}
+</div>
+<h1>{{ chapter.title }}</h1>
+{% if chapter.summary %}<p class="subtitle">{{ chapter.summary }}</p>{% endif %}
+
+<div class="card">
+  <div style="display:flex; justify-content:space-between;">
+    <strong>Chapter progress</strong>
+    <span class="muted">{{ progress.learned }}/{{ progress.total }} · {{ progress.pct }}%</span>
+  </div>
+  <div class="bar good"><span style="width:{{ progress.pct }}%"></span></div>
+</div>
+
+<div class="card">
+  <h3>Lessons</h3>
+  <ul class="list">
+    {% for lesson in lessons %}
+      <li>
+        <a href="{{ lesson.get_absolute_url }}">{{ forloop.counter }}. {{ lesson.title }}</a>
+        <span class="badge {{ status_map|get_item:lesson.id|status_color }}">{{ status_map|get_item:lesson.id|status_label }}</span>
+      </li>
+    {% empty %}
+      <li class="muted">No lessons yet.</li>
+    {% endfor %}
+  </ul>
+</div>
+
+{% if quizzes %}
+<div class="card">
+  <h3>📝 Exams for this chapter</h3>
+  <ul class="list">
+    {% for q in quizzes %}<li><a href="{{ q.get_absolute_url }}">{{ q.title }}</a><span class="meta">{{ q.question_count }} Q</span></li>{% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+{% if labs %}
+<div class="card">
+  <h3>🛠️ Labs for this chapter</h3>
+  <ul class="list">
+    {% for l in labs %}<li><a href="{{ l.get_absolute_url }}">{{ l.title }}</a><span class="tag-diff {{ l.difficulty }}">{{ l.get_difficulty_display }}</span></li>{% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+<div class="card" id="notes">
+  <h3>📒 My notes on this chapter</h3>
+  <form method="post" action="{% url 'note_save' %}">
+    {% csrf_token %}
+    <input type="hidden" name="chapter_id" value="{{ chapter.id }}">
+    <textarea name="body_md" placeholder="Big-picture takeaways for the whole chapter…">{{ note.body_md|default:'' }}</textarea>
+    <div class="hint">Markdown supported. Saved to “My notes”.</div>
+    <div class="btn-row" style="margin-top:10px;"><button class="btn primary" type="submit">Save note</button></div>
+  </form>
+  {% if note.body_md %}<div class="prose" style="margin-top:14px;">{{ note.body_html|safe }}</div>{% endif %}
+</div>
+{% endblock %}

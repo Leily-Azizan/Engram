@@ -1,0 +1,11 @@
+slug: cicd
+name: "CI/CD Pipelines"
+icon: "🚀"
+order: 5
+description: |
+  Continuous Integration and Continuous Delivery/Deployment — automate building,
+  testing, and shipping your code. Covers the pipeline model, GitHub Actions,
+  build/test/lint stages with caching and artifacts, building and pushing Docker
+  images from CI, and deploying safely with secrets and environments. Deep dives
+  explain runners/executors, how secrets are protected, and deployment strategies.
+  Builds directly on the Git and Docker courses.
