@@ -2,7 +2,7 @@ chapter:
   title: "IP Addressing and Subnetting"
   slug: ip-addressing-subnetting
   order: 2
-  summary: "IPv4 addresses, CIDR, private ranges, and how to carve a network into subnets."
+  summary: "IPv4 and IPv6 addressing, CIDR and route aggregation, private ranges and NAT — and how to carve address space into subnets that scale."
 
 lessons:
   - title: "IPv4 addresses, classes, and private ranges"

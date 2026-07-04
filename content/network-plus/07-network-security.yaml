@@ -2,7 +2,7 @@ chapter:
   title: "Network Security"
   slug: network-security
   order: 7
-  summary: "Firewalls, segmentation, VPNs, common attacks, and the defensive mindset."
+  summary: "Firewalls, segmentation, and VPNs; the crypto building blocks behind TLS/SSH; secure-channel trust models; common attacks and the defensive mindset."
 
 lessons:
   - title: "Firewalls, segmentation, and VPNs"

@@ -143,6 +143,326 @@ lessons:
           4. Hiding the SSID only stops the name being advertised — it doesn't add
              encryption or reduce channel interference, so it won't help speed.
 
+  - title: "802.11 under the hood: CSMA/CA, channels & roaming"
+    slug: wifi-under-the-hood
+    order: 2
+    est_minutes: 30
+    summary: "Why radio can't detect collisions, how CSMA/CA and RTS/CTS actually share the air, honest band/channel trade-offs, the association state machine, roaming, and reading it all with iw."
+    body: |
+      ## Why Wi-Fi can't detect collisions
+
+      Classic wired Ethernet used **CSMA/CD** — transmit, *listen while
+      transmitting*, and abort the moment you hear a collision. A radio cannot
+      do that, for two physical reasons:
+
+      - **A transmitting radio is deaf.** Your own signal at your antenna is
+        millions of times stronger than any incoming frame — the receiver
+        circuitry is saturated. Wi-Fi is **half-duplex**: transmit *or*
+        receive, never both.
+      - **The near/far problem.** Even if you could listen, silence at *your*
+        antenna proves nothing about conditions at the *receiver's* antenna —
+        collisions happen where the frame lands, not where it leaves.
+
+      So 802.11 gives up on *detecting* collisions and instead **avoids** them
+      and **confirms** delivery: **CSMA/CA** (Collision *Avoidance*) plus an
+      explicit layer-2 **ACK** for every unicast data frame. No ACK back?
+      Assume the frame died and retransmit. This is why Wi-Fi has retries at
+      layer 2 while Ethernet never did.
+
+      ## CSMA/CA: the actual dance
+
+      1. **Carrier sense** — listen; if the medium is busy, wait until idle.
+      2. Wait one **DIFS** (Distributed Interframe Space) of idle air.
+      3. **Random backoff** — draw a random slot count from the **contention
+         window** and count down, pausing whenever the medium goes busy.
+      4. Transmit the data frame.
+      5. The receiver waits only a **SIFS** (shorter than DIFS — so nobody can
+         cut in) and replies with an **ACK**.
+      6. No ACK → treat it as a collision or corruption: **double the
+         contention window** and go back to step 1.
+
+      The random backoff is the whole trick: two stations that both waited for
+      the same idle moment will almost always draw different numbers, and the
+      lower one wins.
+
+      ## The hidden-terminal problem and RTS/CTS
+
+      Carrier sense assumes everyone can hear everyone. On radio, they often
+      can't:
+
+      ```text
+        A )))))))          ((((((( C
+                 \        /
+                  (( B ))
+        A ↔ B in range   B ↔ C in range   A ✗ C  (can't hear each other)
+      ```
+
+      A and C are both associated to AP **B**, but out of range of *each
+      other*. Both hear silence, both transmit — and their frames **collide at
+      B**, invisibly to both senders. They only find out when no ACK arrives.
+
+      The mitigation is **RTS/CTS**: A first sends a tiny **Request-to-Send**;
+      B answers with **Clear-to-Send**. The CTS is heard by *everyone in B's
+      range — including C* — and carries a duration field. C loads that
+      duration into its **NAV** (Network Allocation Vector — a "shut up until"
+      timer) and stays quiet. RTS/CTS costs airtime, so it's typically enabled
+      only above a frame-size threshold or in dense/hidden-node environments.
+
+      ## Bands, honestly: 2.4 vs 5 vs 6 GHz
+
+      | Band | Range / penetration | Non-overlapping 20 MHz channels | Congestion |
+      |------|--------------------|-------------------------------|------------|
+      | 2.4 GHz | Best | **3** (1 / 6 / 11) | Terrible — microwaves, Bluetooth, every neighbour |
+      | 5 GHz | Medium | ~25 (many need **DFS**) | Moderate |
+      | 6 GHz (Wi-Fi 6E) | Shortest | 59 | Nearly empty (new clients only) |
+
+      Physics sets the trade-off: lower frequencies diffract around obstacles
+      and penetrate walls better, but the 2.4 GHz band is narrow and shared
+      with everything. Many 5 GHz channels are **DFS** (Dynamic Frequency
+      Selection): they're shared with weather/airport radar, so an AP must
+      listen before using them (a *channel availability check*, ~60 s) and
+      **vacate immediately** if it detects radar — that's the mysterious
+      "Wi-Fi dropped for a minute" some offices see.
+
+      **Channel width** is a knob, not a free upgrade: 40/80/160 MHz channels
+      carry proportionally more data, but each doubling halves the number of
+      clean channels *and* ingests more noise. Dense environment rule of
+      thumb: 20 MHz on 2.4 GHz always; 40–80 MHz on 5 GHz depending on how
+      many neighbouring BSSs your scan shows.
+
+      ## Joining a network: the association state machine
+
+      APs broadcast a **beacon** frame roughly 10× a second (every 102.4 ms)
+      advertising SSID, supported rates, channel, and security. Clients can
+      also **probe** actively (probe request → probe response). Then:
+
+      ```text
+      State 1: unauthenticated, unassociated
+          │  authentication request/response ("open system" — a formality)
+      State 2: authenticated, unassociated
+          │  association request/response (AP assigns an AID)
+      State 3: authenticated, associated
+          │  WPA2/WPA3 4-way handshake derives the session keys
+          ▼  ...only now can data frames flow
+      ```
+
+      (The crypto inside that 4-way handshake — PSK vs SAE, key derivation —
+      belongs to chapter 7, *Network Security*.)
+
+      ## Roaming — and why sticky clients hurt everyone
+
+      **The client, not the AP, decides when to roam.** Many clients are
+      "sticky": they cling to the AP they first joined long after a closer one
+      would serve them better. As signal fades, **rate adaptation** steps the
+      link down (866 → 200 → 24 → 6 Mb/s...), and here's the killer: airtime
+      is shared, so a frame sent at 6 Mb/s occupies **~100× more air** than
+      the same frame at 600 Mb/s. One sticky laptop in the far corner slows
+      *every* client on that channel. Standards that help clients roam
+      earlier and faster: **802.11k** (AP gives neighbour reports), **802.11v**
+      (AP can suggest "move to that AP"), **802.11r** (fast handoff — the key
+      exchange is pre-staged so roaming doesn't drop calls).
+
+      ## Personal vs Enterprise, one level deeper
+
+      - **PSK (Personal)** — one passphrase shared by everyone; anyone who has
+        it (and captured your association) can derive your traffic keys.
+        Rotation means reconfiguring every device.
+      - **802.1X/EAP (Enterprise)** — each user authenticates individually
+        against a **RADIUS** server; every client gets unique keys, and you
+        revoke one account instead of rotating a building-wide secret.
+
+      The WPA2/WPA3 cryptography itself (CCMP, SAE, the 4-way handshake) is
+      covered in chapter 7 — here the point is *identity*: shared secret vs
+      per-user credentials.
+
+      ## What actually degrades Wi-Fi
+
+      - **Co-channel interference** — another BSS on *your* channel. CSMA/CA
+        makes you politely share airtime with it: slower, but clean.
+      - **Adjacent-channel interference** — a BSS on an *overlapping* channel
+        (e.g. someone on channel 3 next to your channel 1). Their frames are
+        undecodable noise to you — corrupted frames, no polite sharing. This
+        is why "spread across 1/6/11" beats "pick a random channel".
+      - **Retries** — every one of the above, plus low signal and hidden
+        terminals, shows up in a single number: unACKed frames retransmitted.
+        **Retry rate is THE Wi-Fi health metric.** Above ~10–15 %, the radio
+        is struggling no matter what bitrate is negotiated.
+
+      ## See it on Linux: iw
+
+      ```bash
+      iw dev                       # interfaces, mode, current channel + width
+      iw dev wlan0 link            # your current association
+      sudo iw dev wlan0 scan      # every BSS the radio can hear
+      ```
+
+      ```text
+      $ iw dev
+      phy#0
+              Interface wlan0
+                      type managed                        ← normal client mode
+                      channel 36 (5180 MHz), width: 40 MHz ← 5 GHz, bonded pair
+                      txpower 22.00 dBm
+
+      $ iw dev wlan0 link
+      Connected to a4:2b:b0:c3:11:52 (on wlan0)
+              SSID: office-5g
+              freq: 5180                                  ← channel 36
+              signal: -54 dBm                             ← strong (−50 great, −70 marginal, −80 unusable)
+              rx bitrate: 433.3 MBit/s VHT-MCS 9 40MHz short GI
+              tx bitrate: 433.3 MBit/s VHT-MCS 9 40MHz short GI
+                          └─ PHY rate: expect ~50–60 % of this as real throughput
+      ```
+
+      A scan line worth learning to read: `freq: 2437` = channel 6,
+      `freq: 2462` = channel 11, `freq: 5180` = channel 36. Count how many
+      BSSs share each — that's your congestion map.
+
+      ## In practice — why you care as a DevOps engineer
+
+      Wi-Fi is the first hop of half the "the app is slow" tickets you'll
+      ever triage. Before blaming the backend, `iw dev wlan0 link`: a −78 dBm
+      signal at MCS 2 explains everything, and no amount of server tuning
+      fixes it. The deeper transferable idea is **shared-medium reasoning**:
+      airtime is a contended resource exactly like CPU on an oversubscribed
+      hypervisor — one slow participant (a sticky client, a noisy neighbour
+      VM) degrades everyone, and the fix is scheduling/placement (channels,
+      roaming), not more bandwidth.
+    deep_dive: |
+      ### 802.11 frame types — three kinds of traffic on the air
+
+      Every 802.11 frame's Frame Control field carries a **type** and
+      **subtype**:
+
+      | Type | Purpose | Key subtypes |
+      |------|---------|--------------|
+      | **Management (0)** | Build/tear down the relationship | beacon, probe req/resp, authentication, association req/resp, deauthentication, disassociation |
+      | **Control (1)** | Coordinate access to the medium | **RTS, CTS, ACK**, Block ACK |
+      | **Data (2)** | Carry payload | Data, QoS Data, Null (used purely to signal power-save state) |
+
+      Management frames were historically unencrypted — which is why
+      **deauthentication attacks** (spoofed deauth frames kicking clients off)
+      worked; 802.11w/WPA3 finally protects them. Control frames are tiny and
+      carry no payload at all — they exist only to arbitrate airtime.
+
+      ### One ACKed exchange, in airtime
+
+      Using 5 GHz OFDM timing (slot = 9 µs, SIFS = 16 µs,
+      DIFS = SIFS + 2×slot = 34 µs):
+
+      ```text
+      medium goes idle
+      ├─ DIFS (34 µs) ─┤─ backoff: N × 9 µs ─┤═══ DATA frame ═══┤─SIFS─┤─ ACK ─┤
+                          (N drawn from [0, CW])            (16 µs)
+      ```
+
+      - **SIFS < DIFS is the priority mechanism.** The receiver of a data
+        frame only waits SIFS before ACKing, while every other station must
+        wait at least DIFS *plus* backoff — so nothing can squeeze in between
+        a frame and its ACK. RTS→CTS→DATA→ACK chains are glued together with
+        SIFS gaps for the same reason.
+      - **Contention window doubling.** The backoff count is drawn uniformly
+        from [0, CW]. CW starts at **CWmin = 15** slots; each unACKed attempt
+        doubles it: 15 → 31 → 63 → 127 → 255 → 511 → **CWmax = 1023**, then a
+        success resets it to CWmin. Binary exponential backoff, like classic
+        Ethernet — but applied *before* transmitting, not after a detected
+        collision.
+      - **Backoff is fair via pausing.** A station that loses the draw doesn't
+        re-roll: it freezes its remaining count while the winner transmits and
+        resumes counting afterwards — so it wins soon. Fresh arrivals draw a
+        full new backoff.
+      - **Why retries are so expensive.** A retry pays the whole bill again —
+        DIFS + a (now larger) backoff + the entire frame + SIFS + ACK — and if
+        rate adaptation has also stepped the MCS down, the frame's own airtime
+        balloons on top. That compounding is why a 15 % retry rate feels like
+        a 50 % throughput loss, and why retry rate beats signal strength as
+        the health metric.
+    cards:
+      - front: "Why does 802.11 use CSMA/CA instead of Ethernet's CSMA/CD?"
+        back: "A radio can't detect collisions: while transmitting, its own signal saturates its receiver (half-duplex), and silence at the sender says nothing about the receiver's antenna (near/far). So Wi-Fi avoids collisions with backoff and confirms every unicast frame with an explicit ACK."
+      - front: "Describe the hidden-terminal problem and its mitigation."
+        back: "Two clients both in range of the AP but out of range of each other each hear silence and transmit at once — colliding at the AP, invisibly to both. RTS/CTS mitigates it: the AP's CTS is heard by all its clients and carries a duration that others load into their NAV timer and honor."
+      - front: "Why does one sticky client slow the whole Wi-Fi cell?"
+        back: "Airtime is shared. A client clinging to a distant AP negotiates a very low data rate, so each of its frames occupies many times more airtime per byte — starving every other client on the channel."
+      - front: "What is the single best Wi-Fi health metric, and why?"
+        back: "Retry rate. Every failure mode — interference, weak signal, hidden terminals, congestion — surfaces as unACKed frames being retransmitted. Above roughly 10–15 % the radio is struggling regardless of the negotiated bitrate."
+      - cloze: "In CSMA/CA a sender waits {{c1::DIFS}}, counts down a random {{c2::backoff}}, transmits, and the receiver replies after the shorter {{c3::SIFS}} with an ACK."
+      - cloze: "On each unACKed attempt the contention window {{c1::doubles}}: 15 → 31 → 63 → … up to {{c2::1023}} slots, resetting on success."
+      - cloze: "DFS channels on 5 GHz are shared with {{c1::radar}}; an AP must perform a channel availability check before using one and {{c2::vacate}} it when radar is detected."
+      - cloze: "`iw dev wlan0 {{c1::link}}` shows your current association (signal, bitrates); `sudo iw dev wlan0 {{c2::scan}}` lists every BSS the radio hears."
+      - front: "Order a client's journey onto a Wi-Fi network."
+        back: "Discover (passive beacons or active probe request/response) → authentication (open system — a formality) → association (AP assigns an AID) → WPA 4-way handshake derives session keys → data frames flow."
+    feynman:
+      - "Explain to a junior why real Wi-Fi throughput is always well below the advertised link rate, using airtime, CSMA/CA overhead, and ACKs."
+      - "Two laptops both show full signal bars, yet the office Wi-Fi is slow whenever both upload at once. Using the hidden-terminal topology, explain what may be happening and what RTS/CTS would change."
+      - "Walk through everything that happens on the air from the moment a phone's Wi-Fi is switched on until its first data frame is delivered."
+    labs:
+      - title: "Audit your own Wi-Fi environment with iw"
+        slug: netplus-wifi-iw-audit-lab
+        difficulty: core
+        est_minutes: 25
+        scenario: |
+          Ticket: "Wi-Fi feels slow in the evenings." No fancy tooling, no
+          internet — just your Linux laptop's radio and `iw`. Audit your own
+          wireless environment: how healthy is your link, how crowded is the
+          spectrum around you, and is your AP on a defensible channel?
+        deliverable: |
+          1. `iw dev` — record your interface name, mode, current channel,
+             and channel width.
+          2. `iw dev <if> link` — record SSID, frequency, signal (dBm), and
+             rx/tx bitrate. State the *expected real throughput* from the tx
+             bitrate (the ~50–60 % rule) in one sentence.
+          3. `iw dev <if> station dump` — find the `tx retries` and
+             `tx failed` counters; compute retry rate ≈ retries / packets and
+             judge it against the ~10–15 % threshold.
+          4. `sudo iw dev <if> scan | grep -E "^BSS|freq:|signal:|SSID:"` —
+             build a small table: channel → number of BSSs heard. Identify
+             co-channel vs adjacent-channel neighbours on 2.4 GHz.
+          5. In 3–4 sentences, justify a channel (and width) choice for your
+             own AP based on the scan.
+        hints: |
+          - No Wi-Fi radio in this machine? Do steps 4–5 on the sample scan in
+            the solution — the analysis is the skill.
+          - Scanning while associated works on most drivers but can be slow;
+            `sudo` is required.
+          - freq→channel: 2412=1, 2437=6, 2462=11; 5180=36, 5500+=DFS range.
+          - Signal rough guide: −50 excellent, −67 good, −75 marginal, −80 unusable.
+        solution: |
+          Worked example (a flat with noisy neighbours):
+
+          ```text
+          $ iw dev wlan0 link
+              signal: -58 dBm
+              tx bitrate: 433.3 MBit/s VHT-MCS 9 40MHz short GI
+          ```
+          Expected real throughput ≈ 0.5–0.6 × 433 ≈ **220–260 Mb/s** — anything
+          near that is healthy.
+
+          ```text
+          $ iw dev wlan0 station dump | grep -E "tx (packets|retries|failed)"
+              tx packets:   48210
+              tx retries:   3105
+              tx failed:    12
+          ```
+          Retry rate ≈ 3105/48210 ≈ **6.4 %** → fine (< 10–15 %).
+
+          Scan tally (grep output condensed):
+
+          | Channel | BSSs heard | Note |
+          |---------|-----------|------|
+          | 1 (2412) | 4 | crowded |
+          | 3 (2422) | 1 | *adjacent-channel* offender — noise for ch 1 & 6 |
+          | 6 (2437) | 5 | crowded |
+          | 11 (2462) | 1 | quietest clean channel |
+          | 36 (5180) | 2 | mine + one neighbour |
+          | 100 (5500) | 0 | DFS — empty |
+
+          Justification: on 2.4 GHz pick **channel 11 at 20 MHz** (fewest BSSs,
+          non-overlapping; the ch-3 rogue mostly hurts 1/6). For the 5 GHz SSID,
+          stay on 36 at 40 MHz, or move to a **DFS channel (100) at 80 MHz** if
+          occasional radar-triggered vacates are acceptable — it's empty, so
+          co-channel contention drops to zero.
+
 quiz:
   title: "Wireless — chapter exam"
   slug: netplus-wireless-exam

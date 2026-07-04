@@ -263,6 +263,548 @@ lessons:
           4. DNS lookup → **UDP** (tiny, fast; falls back to TCP if needed).
           5. Live video → **UDP** (smoothness beats occasional dropped frames).
 
+  - title: "Encapsulation in action: following a packet down the stack"
+    slug: encapsulation-in-action
+    order: 3
+    est_minutes: 30
+    summary: "Trace one HTTP GET from write() to bits on the wire — real header fields, the final frame layout, MTU, and what each device touches."
+    body: |
+      ## From write() to the wire
+
+      The first two lessons gave you the map. Now walk the territory: one HTTP
+      GET, followed byte-by-byte from your program down to electrons.
+
+      Your app (curl, requests, a Django health check) does something like:
+
+      ```c
+      write(fd, "GET / HTTP/1.1\r\nHost: 127.0.0.1:8080\r\n...", 77);
+      ```
+
+      At this moment there are **no packets anywhere** — just 77 bytes copied
+      into the socket's **send buffer** in the kernel. TCP is a byte stream;
+      packetisation is the kernel's business, not yours.
+
+      ## Layer by layer: what gets prepended
+
+      ### L4 — TCP wraps the bytes into a segment
+
+      The kernel prepends a **TCP header** (20 bytes minimum, typically 32 with
+      options) containing, among others:
+
+      | Field | Example value | Why it exists |
+      |-------|---------------|---------------|
+      | Source port | 51234 (**ephemeral**, picked by kernel) | reply routing back to *your* socket |
+      | Destination port | 8080 | which service on the far host |
+      | Sequence number | 1 (relative) | ordering & loss detection |
+      | Acknowledgment | 1 | "I've received everything before this" |
+      | Flags | `PSH, ACK` | deliver now; ack is valid |
+      | Window | 512 (scaled) | how much more I can absorb |
+      | Checksum | 0xfe75 | corruption detection |
+
+      ### L3 — IP wraps the segment into a packet
+
+      Another 20 bytes go in front:
+
+      - **Version + IHL**: `4` and `5` (5 × 4 = 20-byte header) → first byte `0x45`
+      - **Total length**: header + everything inside (here 129)
+      - **TTL**: starts at **64** on Linux; each router decrements it
+      - **Protocol**: **6** = TCP (17 would be UDP) — tells the receiver which
+        L4 module gets the payload
+      - **Source and destination IP addresses**
+
+      ### L2 — Ethernet wraps the packet into a frame
+
+      A 14-byte header in front and a 4-byte trailer behind:
+
+      - **Destination MAC** — and here's the subtle part: if the server is on a
+        *different* network, this is the **default gateway's MAC**, not the
+        server's. L3 addressing is end-to-end; L2 addressing is only ever
+        **next hop**.
+      - **Source MAC** — your NIC.
+      - **EtherType `0x0800`** — "the payload is IPv4" (0x86DD would be IPv6).
+      - **FCS** — a CRC-32 appended after the payload; receivers silently drop
+        frames that fail it.
+
+      ### L1 — bits
+
+      The NIC prepends a preamble (7 bytes + start-frame delimiter), encodes the
+      whole thing as line signals, and it's electrons/photons/radio from here.
+
+      ## The final frame, drawn to scale-ish
+
+      ```text
+       outermost (sent first)                                    innermost
+       +--------------+---------------+-------------+----------------+-----+
+       | Ethernet 14B | IPv4 20B      | TCP 20-32B  | HTTP data      | FCS |
+       | dst MAC      | ver=4  IHL=5  | src 51234   | GET / HTTP/1.1 | 4B  |
+       | src MAC      | len=129 TTL=64| dst 8080    | Host: ...      |     |
+       | type 0x0800  | proto=6       | seq/ack     |                |     |
+       |              | srcIP  dstIP  | flags PSH,ACK|               |     |
+       +--------------+---------------+-------------+----------------+-----+
+                      |<------- max 1500 bytes (the MTU) ----------->|
+      ```
+
+      Each layer's "payload" is simply *everything to its right*.
+
+      ## MTU: why 1500 matters
+
+      Ethernet caps the frame payload at the **MTU — 1500 bytes** (a 1980s
+      compromise between latency and buffer cost that we're stuck with). So the
+      most application data one segment can carry is:
+
+      ```text
+      MSS = 1500 − 20 (IP) − 20 (TCP) = 1460 bytes
+      ```
+
+      If IP is handed something bigger than the link's MTU it must **fragment**
+      it — or, if the Don't Fragment bit is set (Linux default, for path MTU
+      discovery), drop it and signal the sender to use smaller packets. When
+      that signal gets firewalled away, you get the classic **MTU black hole**:
+      pings work, small requests work, and anything big just *hangs*. Tunnels
+      and overlays (VPNs, VXLAN in Kubernetes, WireGuard) shave 30–80 bytes off
+      the effective MTU, which is why cloud docs are full of numbers like 1450
+      and 8951.
+
+      Check any interface's MTU:
+
+      ```bash
+      $ ip link show lo
+      1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue ...
+      ```
+
+      Loopback says **65536** — there's no real cable, so the kernel picks a
+      huge MTU to cut per-packet overhead.
+
+      ## Who reads what, who rewrites what
+
+      | Device | Reads | Rewrites | Never touches |
+      |--------|-------|----------|---------------|
+      | **Switch** | dst MAC | nothing (just forwards the frame) | IP, TCP, data |
+      | **Router** | dst IP | src+dst MAC (new link), TTL −1, IP checksum, new FCS | TCP header, data |
+      | **Host (receiver)** | everything, layer by layer | strips all headers on the way up | — |
+
+      The end-to-end fields (IPs, ports, payload) survive the whole journey;
+      the L2 "envelope" is torn off and rewritten at **every hop**.
+
+      ## Watch it happen: tcpdump on loopback
+
+      Three terminals, zero internet needed:
+
+      ```bash
+      # T1 — a real HTTP server
+      python3 -m http.server 8080 --bind 127.0.0.1
+
+      # T2 — capture with link-level headers (-e) and hex (-X)
+      sudo tcpdump -i lo -nn -e -X 'tcp port 8080'
+
+      # T3 — generate one GET
+      curl -s http://127.0.0.1:8080/ > /dev/null
+      ```
+
+      In the capture, find the GET packet:
+
+      ```text
+      12:04:11.482910 00:00:00:00:00:00 > 00:00:00:00:00:00, ethertype IPv4 (0x0800),
+        length 143: 127.0.0.1.51234 > 127.0.0.1.8080: Flags [P.], seq 1:78, ack 1,
+        win 512, options [nop,nop,TS val 891201 ecr 891201], length 77: HTTP: GET / HTTP/1.1
+          0x0000:  4500 0081 3f1a 4000 4006 fd5a 7f00 0001  E...?.@.@..Z....
+          0x0010:  7f00 0001 c822 1f90 89ab cdef 1234 5679  .....".......4Vy
+          0x0020:  8018 0200 fe75 0000 0101 080a 000d 9941  .....u.........A
+          0x0030:  000d 9941 4745 5420 2f20 4854 5450 2f31  ...AGET./.HTTP/1
+      ```
+
+      Read the layers straight out of the hex:
+
+      - `45` — IPv4, 20-byte header. `40 06` — TTL 64, protocol 6 (TCP).
+      - `7f00 0001` twice — 127.0.0.1 → 127.0.0.1.
+      - `c822 1f90` — ports 51234 → 8080. `8018` — 32-byte TCP header, PSH+ACK.
+      - `4745 5420` — ASCII `GET ` — your actual HTTP, in the clear.
+
+      The MACs are all zeros: loopback has no NIC, so L2 is a formality — but
+      the frame structure is still there, which is exactly the point of layers.
+
+      ## In practice: why you care as a DevOps engineer
+
+      - **Overlay-network MTU bugs** are a rite of passage: a K8s pod can
+        `ping` a service but a 2 KB POST hangs forever. You now know why, and
+        that the fix is MTU/MSS clamping — not "restart the pod".
+      - Reading `tcpdump` at the byte level turns "the network is broken" into
+        "TTL arrives as 1" or "the response never leaves the host" — claims you
+        can prove.
+      - Vocabulary precision matters in incidents: a switch that "drops
+        packets" and a router that "drops frames" are physically different
+        failures. Say segment/packet/frame and mean it.
+    deep_dive: |
+      ### One buffer, zero copies: the sk_buff journey
+
+      Inside Linux, your GET travels as a single **`sk_buff`** ("skb") — the
+      kernel's universal packet structure. The trick that makes layering cheap:
+      when the skb is allocated, the kernel reserves **headroom** in front of
+      the data. Each layer then just calls `skb_push()` to slide the data
+      pointer backwards and write its header into the reserved space — TCP,
+      then IP, then Ethernet, **no copying, no reallocation**. Encapsulation
+      isn't "wrapping" at all; it's three pointer decrements.
+
+      ### Where the field values come from
+
+      - The **ephemeral source port** is picked from
+        `/proc/sys/net/ipv4/ip_local_port_range` (typically 32768–60999) —
+        that's ~28k concurrent outbound connections to one destination before
+        you exhaust it, a real ceiling for busy proxies.
+      - The **destination MAC** comes from the ARP/neighbour cache (`ip neigh`)
+        — if it's missing, the packet *waits* while ARP resolves. That's a
+        source of first-packet latency you can actually observe.
+      - **TTL 64** is `/proc/sys/net/ipv4/ip_default_ttl`; Windows uses 128 —
+        crude OS fingerprinting from one captured packet.
+
+      ### Why tcpdump shows "impossible" packets
+
+      Two offloads routinely confuse people reading captures:
+
+      - **Checksum offload**: the kernel leaves the TCP checksum unfinished and
+        the NIC computes it in hardware. `tcpdump` taps *before* the NIC, so
+        outgoing packets show `cksum ... (incorrect)`. Harmless.
+      - **GSO/TSO (segmentation offload)**: the kernel hands the NIC one giant
+        64 KB "superpacket" and the NIC slices it into MTU-sized frames in
+        silicon. So on the *sender* you'll see frames "bigger than the MTU" —
+        e.g. `length 20486` on lo. Capture on the receiver (or
+        `ethtool -K eth0 tso off` temporarily) to see true wire-size frames.
+
+      ### What you'll never see in a capture
+
+      The **FCS trailer and preamble never reach tcpdump** — the NIC verifies
+      the CRC and strips both before handing the frame to the driver (bad-CRC
+      frames just vanish, visible only as `rx_crc_errors` in `ethtool -S`).
+      Ethernet also enforces a **64-byte minimum frame**: tiny payloads like a
+      lone ACK get zero-padded on the wire. So the wire cost of "1 byte of
+      data" is 64 bytes plus preamble plus inter-frame gap — per-packet
+      overhead, not bandwidth, is why jumbo frames (MTU 9000) exist in
+      datacenters and why loopback picks MTU 65536.
+    cards:
+      - front: "On the wire, what is the order of headers from outermost to innermost for an HTTP request?"
+        back: "Ethernet header | IP header | TCP header | HTTP data, followed by the Ethernet FCS trailer. Each layer's payload is everything inside it."
+      - cloze: "Standard Ethernet MTU is {{c1::1500}} bytes, so the TCP MSS is 1500 − 20 − 20 = {{c2::1460}} bytes of application data per segment."
+      - front: "What does a router rewrite when forwarding a packet, and what does it leave alone?"
+        back: "Rewrites: source & destination MAC (for the next link), decrements TTL, recomputes the IP header checksum and FCS. Leaves alone: source/destination IP, TCP header, and payload."
+      - front: "You connect to a server on another network. Whose MAC address is in your frame's destination field?"
+        back: "The default gateway's (next-hop router's) MAC — never the server's. L2 addressing is hop-by-hop; only L3 addressing is end-to-end."
+      - cloze: "EtherType {{c1::0x0800}} in the Ethernet header means the payload is IPv4, and IP protocol number {{c2::6}} means the payload is TCP (17 = UDP)."
+      - front: "Why does tcpdump on the sending host sometimes show frames far larger than the MTU?"
+        back: "Segmentation offload (GSO/TSO): the kernel hands the NIC one large buffer and the NIC slices it into MTU-sized frames in hardware — tcpdump taps above the NIC, before slicing."
+      - cloze: "The Ethernet header is {{c1::14}} bytes and the FCS trailer is {{c2::4}} bytes; the minimum Ethernet frame is {{c3::64}} bytes (short payloads are padded)."
+      - front: "Symptoms of an MTU black hole, and where it typically comes from?"
+        back: "Ping and small requests work; large transfers hang. Common cause: a tunnel/overlay (VPN, VXLAN) reduced the effective MTU and ICMP 'fragmentation needed' messages are being filtered, breaking path MTU discovery."
+    feynman:
+      - "Walk a junior through everything that happens to an HTTP GET between the app calling write() and bits leaving the machine — name every header added and one key field in each."
+      - "A colleague says 'the switch routes my packets to the server'. Gently untangle the vocabulary: what does each device (switch, router, host) actually read and rewrite, and what are the PDUs really called?"
+      - "Explain to your team why a Kubernetes pod can ping a service but large POSTs to it hang, using MTU and encapsulation overhead."
+    labs:
+      - title: "See every layer of one HTTP GET with tcpdump on loopback"
+        slug: netplus-encap-tcpdump-lab
+        difficulty: core
+        est_minutes: 25
+        scenario: |
+          Ticket NET-231: "Intermittent hangs on large uploads through the new
+          VPN — suspected MTU issue." Before touching the VPN, your tech lead
+          wants proof you can read raw layers in a capture. Your task: generate
+          one HTTP GET entirely on your own machine and dissect it byte by
+          byte. No internet required — everything runs on loopback.
+        deliverable: |
+          1. Terminal 1: `python3 -m http.server 8080 --bind 127.0.0.1`
+          2. Terminal 2: `sudo tcpdump -i lo -nn -e -X 'tcp port 8080'`
+          3. Terminal 3: `curl -s http://127.0.0.1:8080/ > /dev/null`
+          4. In the captured GET packet, identify and write down:
+             a. the client's ephemeral source port (decimal),
+             b. the TTL byte and the protocol byte in the IP header,
+             c. the IP "total length" field in hex and converted to decimal,
+             d. the first 4 ASCII characters of the HTTP payload in the hex dump.
+          5. Run `ip link show lo` and record the MTU. Explain in one sentence
+             why it isn't 1500.
+          6. In two sentences: if this exact packet crossed one router on a real
+             network, which fields would change and which would not?
+        hints: |
+          - The IP header starts right after the tcpdump summary line: `45` =
+            IPv4 with a 20-byte header; the bytes are `4500 <total-length> ...`.
+          - TTL and protocol are bytes 9 and 10 of the IP header — look for
+            `4006` (TTL 64, protocol 6 = TCP).
+          - `7f00 0001` is 127.0.0.1. The two bytes right after the second one
+            are the source port: convert hex → decimal (e.g. 0xc822 = 51234).
+          - `47 45 54 20` in ASCII is `GET `.
+          - Loopback has no physical link, so the kernel chooses a huge MTU to
+            minimise per-packet overhead.
+        solution: |
+          Sample capture (your ports/timestamps will differ):
+
+          ```text
+          00:00:00:00:00:00 > 00:00:00:00:00:00, ethertype IPv4 (0x0800), length 143:
+          127.0.0.1.51234 > 127.0.0.1.8080: Flags [P.], seq 1:78, ack 1, win 512, length 77
+              0x0000:  4500 0081 3f1a 4000 4006 fd5a 7f00 0001
+              0x0010:  7f00 0001 c822 1f90 ...
+              0x0030:  ...  4745 5420 ...            (= "GET ")
+          ```
+
+          4a. Source port `0xc822` = **51234** (any value 32768–60999 is normal —
+              it comes from `/proc/sys/net/ipv4/ip_local_port_range`).
+          4b. `40` = **TTL 64**, `06` = **protocol 6 (TCP)**.
+          4c. Total length `0x0081` = **129** bytes (20 IP + 32 TCP + 77 data);
+              the Ethernet line shows 143 = 129 + 14-byte Ethernet header.
+          4d. `4745 5420` → **`GET `** — the HTTP request in cleartext.
+          5. `mtu 65536` — loopback is a software device with no cable, so the
+             kernel uses a giant MTU to cut per-packet processing overhead.
+          6. A router would rewrite the source and destination **MACs**,
+             decrement **TTL** to 63, and recompute the **IP checksum** and FCS.
+             The source/destination **IPs, ports, TCP header, and payload**
+             would arrive untouched — L2 is per-hop, L3/L4 are end-to-end.
+
+  - title: "Bandwidth, latency, and the delay×bandwidth product"
+    slug: network-performance
+    order: 4
+    est_minutes: 30
+    summary: "Propagation vs transmission delay, RTT, goodput, jitter — and the back-of-envelope math (bits in flight, transfer times) every DevOps engineer needs."
+    body: |
+      ## Two different kinds of "slow"
+
+      "The network is slow" is not a diagnosis. There are two independent
+      quantities, and they fail differently:
+
+      - **Bandwidth** — how many bits per second the pipe carries (its width).
+      - **Latency** — how long one bit takes to get there (its length).
+
+      A truck full of backup tapes has *phenomenal* bandwidth and *terrible*
+      latency. A geostationary satellite link can carry 100 Mbps yet every
+      request waits ~550 ms. Fixing one does nothing for the other.
+
+      ## Where delay actually comes from
+
+      End-to-end delay is the sum of four components:
+
+      | Component | Formula / cause | Example |
+      |-----------|-----------------|---------|
+      | **Transmission** (serialization) | size ÷ bandwidth | 1500 B at 100 Mbps = 0.12 ms |
+      | **Propagation** | distance ÷ signal speed | light in fiber ≈ 200,000 km/s → **5 µs/km**, 1 ms per 200 km |
+      | **Queueing** | waiting in device buffers | varies with load — the volatile one |
+      | **Processing** | routers/hosts examining headers | µs per hop |
+
+      **RTT** (round-trip time) is what `ping` reports: there and back, all four
+      components, twice. Typical orders of magnitude to memorise:
+
+      ```text
+      localhost           ~0.05 ms
+      same datacenter     ~0.5  ms
+      same continent      ~20–40 ms
+      transatlantic       ~80   ms
+      geostationary sat   ~550  ms
+      ```
+
+      Note what upgrading bandwidth changes: **only the transmission term**.
+      Propagation is physics — no budget makes light faster.
+
+      ## Throughput, goodput, jitter
+
+      - **Throughput**: bits/second actually transferred over a link.
+      - **Goodput**: *useful application bytes* per second — after subtracting
+        headers, retransmissions, and protocol chatter. A full-size Ethernet
+        frame carries 1460 payload bytes but occupies 1538 on the wire
+        (preamble + headers + FCS + inter-frame gap): ~**95% efficiency at
+        best**, less with loss.
+      - **Jitter**: the *variation* in latency between packets. Bulk transfers
+        don't care; real-time audio/video care more about jitter than about
+        average latency (that's why VoIP uses jitter buffers). `ping` reports
+        it as **`mdev`** on its summary line.
+
+      ## The delay×bandwidth product: how many bits fit in the pipe
+
+      Think of the link as a physical pipe: bandwidth is its cross-section,
+      delay is its length. Multiply them and you get its **volume** — the
+      number of bits that are *in flight*, already sent but not yet received:
+
+      ```text
+      BDP = bandwidth × RTT
+      100 Mbps × 80 ms  =  8,000,000 bits  =  1 MB in flight
+      ```
+
+      Why it matters: a reliable protocol like TCP can only have a limited
+      amount of unacknowledged data outstanding — its **window** (chapter 3
+      covers how the window is managed; here we only need the bound). The
+      sender then transmits at most one window per round trip:
+
+      ```text
+      max throughput ≤ window ÷ RTT
+      ```
+
+      With a 64 KB window on an 80 ms path: 64 KB × 8 ÷ 0.08 s ≈ **6.5 Mbps —
+      on a 100 Mbps link**. The link is 94% idle and nothing is "broken". To
+      fill a pipe, the window (and the socket buffers backing it) must be
+      **at least the BDP**. This single inequality explains most "transfer is
+      slow between regions" tickets.
+
+      ## Back-of-envelope math you'll actually do
+
+      **How long to move 10 GB across 100 Mbps?**
+
+      ```text
+      10 GB ≈ 80 Gbit   (bytes × 8 — the classic trap)
+      80,000 Mbit ÷ 100 Mbps = 800 s ≈ 13.3 minutes     (best case!)
+      at 1 Gbps: ≈ 80 s.   Real transfers add TCP ramp-up and disk time.
+      ```
+
+      Do this *before* promising a maintenance window or planning a DB
+      migration, and remember ISPs sell **bits** per second while `ls -lh`
+      shows **bytes**.
+
+      **Why is my API slow from Sydney?** A 2 KB response at 100 Mbps costs
+      0.16 ms of transmission — but the RTT is 60 ms. Wire time is under 1% of
+      the response time; **latency dominates small transfers**. And it
+      compounds: a page that makes 20 *sequential* API/DB calls pays
+      20 × 60 ms = **1.2 s of pure physics**, on any bandwidth, forever. The
+      fixes are architectural — batch calls, cache, keep connections alive, put
+      replicas near users — not "more bandwidth".
+
+      ## Measure it with tools you already have
+
+      `curl` exposes the full timing breakdown of a request:
+
+      ```bash
+      curl -o /dev/null -s -w 'connect:  %{time_connect}s\nttfb:     %{time_starttransfer}s\ntotal:    %{time_total}s\nspeed:    %{speed_download} bytes/s\n' \
+        http://127.0.0.1:8080/big.bin
+      ```
+
+      - `time_connect` — TCP connection established (≈ 1 RTT)
+      - `time_starttransfer` — first response byte (**TTFB**: RTT + server think time)
+      - `time_total` and `speed_download` — the throughput part
+
+      If `time_starttransfer` is large but `speed_download` is fine, your
+      problem is latency or a slow backend — not the pipe. That one distinction
+      correctly triages half of all "slow service" tickets.
+
+      ## In practice: why you care as a DevOps engineer
+
+      - **Capacity planning**: backup windows, image pulls, log shipping — all
+        are `bytes × 8 ÷ rate` first, tooling second.
+      - **Cross-region design**: replication and chatty microservices pay the
+        RTT tax per round trip. Count the round trips, not the megabits.
+      - **Buffer tuning**: "fast link, slow transfer" between distant DCs is
+        the BDP inequality — check window/buffer sizes before blaming the WAN.
+      - **Honest dashboards**: report latency percentiles *and* throughput;
+        averaging them hides exactly the thing users feel.
+    deep_dive: |
+      ### Where the milliseconds hide on a Linux host
+
+      **How ping gets its number.** `ping` writes the send timestamp *into the
+      ICMP echo payload*; the peer echoes it back verbatim, and ping subtracts
+      on return — so the measurement includes both kernels' network stacks,
+      scheduling delays and all. Modern kernels can timestamp packets at the
+      driver (`SO_TIMESTAMPING`) to factor the local stack out; on loopback,
+      "RTT" is almost purely two trips through the kernel — ~30–50 µs — which
+      is your floor for any localhost service call.
+
+      **Queueing delay is the volatile term — and it lives in buffers you
+      control.** Every hop has a queue (on Linux: the qdisc — `tc qdisc show`).
+      Oversized buffers cause **bufferbloat**: under load, packets wait hundreds
+      of ms in RAM before touching the wire, so *latency explodes exactly when
+      throughput peaks*. Modern distros default to `fq_codel`, which drops
+      early to keep queues — and thus latency — short. If a loaded link shows
+      great throughput and awful ping, suspect the queue, not the distance.
+
+      **The BDP inequality is enforced by socket buffers.** TCP's window can
+      never exceed the memory set aside to hold unacknowledged (send side) or
+      out-of-order (receive side) data:
+
+      ```text
+      sysctl net.ipv4.tcp_rmem   # min  default  max   (receive)
+      sysctl net.ipv4.tcp_wmem   # min  default  max   (send)
+      ```
+
+      Linux **auto-tunes** each socket's buffer between min and max as the
+      connection reveals its BDP — but it can never grow past `max`. On
+      high-BDP paths (10 Gbps × 100 ms = 125 MB!) the default max of a few MB
+      is the ceiling; raising it is the classic long-fat-network fix. An app
+      calling `setsockopt(SO_RCVBUF)` *disables* auto-tuning and freezes the
+      window — a famously sneaky self-inflicted wound.
+
+      **Why localhost throughput is "impossible".** Your loopback lab will
+      report tens of Gbit/s. There is no wire: transmission delay is zero and
+      each "send" is memcpy through the kernel. What limits it is **per-packet
+      CPU cost** (syscalls, interrupts, skb handling) — which is why lo uses
+      MTU 65536, why real NICs offload segmentation, and why datacenters run
+      jumbo frames: fewer packets per byte moved. On loopback you're
+      benchmarking your kernel and your HTTP server — a *clean* baseline,
+      because everything network-ish has been subtracted.
+    cards:
+      - cloze: "Transmission delay = size ÷ {{c1::bandwidth}}; propagation delay = distance ÷ {{c2::signal speed}} — only the first improves when you buy a faster link."
+      - front: "Roughly how long does 10 GB take over a 100 Mbps link, and what's the calculation?"
+        back: "10 GB ≈ 80 Gbit (bytes × 8); 80,000 Mbit ÷ 100 Mbps = 800 s ≈ 13 minutes, best case. At 1 Gbps: ~80 s."
+      - cloze: "Light in fiber travels ≈ {{c1::200,000}} km/s ≈ 5 µs per km, i.e. about 1 ms per {{c2::200}} km — physics no bandwidth upgrade can fix."
+      - front: "Define the bandwidth-delay product and state why it matters for TCP."
+        back: "BDP = bandwidth × RTT = the bits 'in flight' in the pipe. TCP's window (and socket buffers) must be ≥ BDP or the sender idles between ACKs and can't fill the link."
+      - front: "A 64 KB TCP window on an 80 ms RTT path — what's the maximum throughput, on any link speed?"
+        back: "throughput ≤ window ÷ RTT = 64 KB × 8 ÷ 0.08 s ≈ 6.5 Mbps — even on a 100 Gbps link."
+      - cloze: "{{c1::Goodput}} is useful application bytes/s after headers and retransmits; {{c2::jitter}} is the variation in latency, shown by ping as {{c3::mdev}}."
+      - front: "Why do 20 sequential API calls from a 60 ms-RTT client take over a second no matter the bandwidth?"
+        back: "Each sequential request pays at least one RTT: 20 × 60 ms = 1.2 s of pure propagation. Latency dominates small transfers; fix with batching, caching, keep-alive, or moving the data closer."
+      - front: "In curl -w output, TTFB is high but speed_download is fine. Where do you look?"
+        back: "Latency or backend think-time (time_starttransfer includes RTT + server processing), not link capacity — the pipe is proven fine by the download speed."
+    feynman:
+      - "Explain to a junior why upgrading a transatlantic link from 1 Gbps to 10 Gbps may barely speed up a single TCP transfer, using the pipe/BDP picture."
+      - "Your manager asks why the nightly 50 GB backup fits easily in its window over 100 Mbps, yet the 2 KB dashboard API feels slow from Australia. Explain both, with the actual numbers."
+      - "Using ping's summary line (min/avg/max/mdev), explain latency vs jitter and which one a video call cares about most."
+    labs:
+      - title: "Measure latency, jitter, and throughput on localhost"
+        slug: netplus-localhost-perf-lab
+        difficulty: core
+        est_minutes: 30
+        scenario: |
+          Ticket NET-244: "File sync between eu-west and ap-south crawls at
+          ~6 Mbps on a 1 Gbps line." You suspect the BDP inequality, but first
+          you need to practice the measurement methodology somewhere it can't
+          lie to you. Baseline everything on loopback: latency, jitter, and
+          HTTP throughput — no internet, no extra tools.
+        deliverable: |
+          1. `ping -c 100 127.0.0.1` — record min/avg/max/mdev from the summary
+             line and state which number is the jitter.
+          2. `sudo ping -f -c 10000 127.0.0.1` — flood ping; compare avg to
+             step 1 and note the packet-loss percentage.
+          3. Build a test file and serve it:
+             `dd if=/dev/zero of=/tmp/big.bin bs=1M count=500`
+             then in another terminal `cd /tmp && python3 -m http.server 8080 --bind 127.0.0.1`.
+          4. Time the transfer 3 times:
+             `curl -o /dev/null -s -w 'connect: %{time_connect}s  ttfb: %{time_starttransfer}s  total: %{time_total}s  speed: %{speed_download} B/s\n' http://127.0.0.1:8080/big.bin`
+          5. Convert the best speed_download to Gbit/s (× 8 ÷ 10⁹). Explain in
+             two sentences why no "link speed" limits this number.
+          6. The BDP question: if you needed this same throughput across an
+             80 ms RTT path, compute the required TCP window/buffer size
+             (throughput × 0.08 ÷ 8, in MB). Compare it with
+             `sysctl net.ipv4.tcp_rmem` and say whether the default max would
+             suffice.
+        hints: |
+          - ping's last line looks like: `rtt min/avg/max/mdev = 0.018/0.033/0.101/0.012 ms` — mdev is the jitter.
+          - Flood ping needs root; expect avg to *drop* (warm caches, no 1 s
+            sleeps between packets).
+          - 500 MB at, say, 2.5 s total ≈ 200 MB/s ≈ 1.6 Gbit/s.
+          - Required window in bytes = (bytes/s) × RTT(s). Express in MB and
+            compare against the third number of tcp_rmem.
+        solution: |
+          Typical results on a laptop (yours will vary):
+
+          ```text
+          1. rtt min/avg/max/mdev = 0.020/0.041/0.110/0.014 ms → jitter = mdev = 0.014 ms
+          2. flood: avg ≈ 0.008 ms, 0% loss — lower because there is no
+             inter-packet sleep and caches stay hot.
+          4. connect: 0.0002s  ttfb: 0.0009s  total: 2.1s  speed: ~2.5e8 B/s
+          5. 2.5e8 × 8 = 2.0 Gbit/s. Loopback has no wire — transmission
+             delay is zero and data moves by memcpy through the kernel, so the
+             limit is CPU/per-packet overhead, not any link rate.
+          6. Window ≥ 2.5e8 B/s × 0.08 s = 20 MB. Default tcp_rmem max is
+             usually ~6 MB → throughput would cap at ~6 MB / 0.08 s ≈ 600 Mbps
+             (and default *initial* buffers far lower). This is exactly the
+             NET-244 symptom: raise net.ipv4.tcp_rmem/tcp_wmem max (or the
+             app's buffers) so the window can reach the BDP.
+          ```
+
+          Methodology takeaway: latency/jitter from ping's summary, throughput
+          and TTFB from curl -w, and the BDP inequality
+          (throughput ≤ window ÷ RTT) to connect the two.
+
 quiz:
   title: "Network Models — chapter exam"
   slug: netplus-network-models-exam
