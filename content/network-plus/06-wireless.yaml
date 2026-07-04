@@ -2,7 +2,7 @@ chapter:
   title: "Wireless Networking"
   slug: wireless
   order: 6
-  summary: "Wi-Fi standards, frequency bands, channels, and wireless security."
+  summary: "Wi-Fi standards, frequency bands and channels, CSMA/CA and roaming mechanics, and wireless security."
 
 lessons:
   - title: "Wi-Fi standards, bands, and security"
@@ -79,6 +79,32 @@ lessons:
       So "use WPA2/WPA3, prefer Enterprise for orgs" is really "use unbroken
       encryption and per-user keys" — the confidentiality + authentication pillars
       from the security chapter, applied to a medium anyone nearby can receive.
+
+      ### How each generation actually got faster (and why the box number lies)
+
+      The headline rates in the table are **PHY rates** — the raw speed at which a
+      single, perfect frame is modulated onto the air. Each generation pulled three
+      levers:
+
+      - **Denser modulation** — more bits packed into each radio symbol:
+        802.11n topped out at 64-QAM (6 bits/symbol), ac at **256-QAM** (8),
+        ax at **1024-QAM** (10). Denser constellations need a much cleaner
+        signal, so the top rates only exist close to the AP; as you walk away,
+        **rate adaptation** steps down through lower modulations.
+      - **Wider channels** — bonding 20 MHz channels into 40/80/160 MHz.
+        Doubling width roughly doubles the rate, but consumes more of the band
+        and ingests more noise (more on this trade-off in the next lesson).
+      - **More spatial streams (MIMO)** — multiple antennas sending parallel
+        streams over different reflection paths. 802.11ac added **MU-MIMO**
+        (transmit to several clients simultaneously); 802.11ax added **OFDMA**,
+        which subdivides one channel among several clients *within a single
+        transmission* — a big win for many small-packet clients (phones, IoT).
+
+      Real-world throughput is roughly **50–60 % of the PHY rate at best**:
+      CSMA/CA contention, interframe gaps, per-frame ACKs, and management
+      traffic all consume airtime (the exact mechanics are the next lesson,
+      *802.11 under the hood*). So a "Wi-Fi 5, 866 Mb/s" link that delivers
+      ~450 Mb/s of measured throughput is *healthy*, not broken.
     cards:
       - front: "Why prefer 5 GHz over 2.4 GHz when range allows?"
         back: "5 GHz is faster, has many more non-overlapping channels, and far less interference; 2.4 GHz only has 3 clean channels (1/6/11) and is crowded — though it reaches further."

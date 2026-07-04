@@ -79,6 +79,31 @@ lessons:
       far side reverses every step: L2 checks the CRC and strips its header, L3
       checks the destination IP, L4 reassembles segments by sequence number and
       hands the bytes to the right port — i.e., to your application.
+
+      ### Where each layer actually lives on a Linux box
+
+      The OSI diagram looks like seven equal boxes; the real implementation is
+      lopsided:
+
+      - **L7–L5 live in user space** — your process and its libraries. TLS
+        (the classic "L6" example) is just OpenSSL linked into curl or nginx;
+        the kernel never sees your plaintext.
+      - **L4 and L3 live in the kernel** (`net/ipv4/`): TCP state machines,
+        retransmit timers, routing decisions, and the netfilter hooks that
+        iptables/nftables attach to.
+      - **L2 is split** between the kernel's NIC driver and the NIC hardware
+        itself — modern cards compute checksums and split/merge segments in
+        silicon (offloading), which is why `tcpdump` sometimes reports
+        "incorrect" checksums that are perfectly fine on the wire.
+      - **L1 is a PHY chip** the OS only configures (speed, duplex — `ethtool`).
+
+      The **socket API is the boundary line**: `strace` shows your app making
+      `connect()`/`sendto()` syscalls, never packets, while `tcpdump` taps just
+      above the driver and sees frames your app never will. That's why TLS
+      errors show up in *application logs* but retransmissions show up in
+      *kernel counters* (`ss -ti`, `netstat -s`). And it's why nobody can agree
+      whether something is "layer 5 or 6 or 7" in real stacks — user space
+      blurs them into "the application", exactly as the TCP/IP model admits.
     cards:
       - front: "Which OSI layer handles logical addressing and routing between networks?"
         back: "Layer 3, the Network layer (IP, routers)."
@@ -185,6 +210,24 @@ lessons:
       why DNS, DHCP and real-time media use it, since a lost packet costs less than
       waiting for a retransmit. Protocols that want reliability over UDP (like
       QUIC) rebuild it themselves in user space.
+
+      ### How the kernel finds *your* socket
+
+      When a segment arrives, the kernel must deliver it to exactly one process.
+      For **TCP** it hashes the **4-tuple** — (source IP, source port,
+      destination IP, destination port) — into a lookup table of established
+      sockets; that's what each line of `ss -tn` represents. For **UDP** a
+      **2-tuple** (destination IP, destination port) is enough, since there is
+      no connection to distinguish.
+
+      The failure modes differ tellingly: a TCP segment to a closed port gets an
+      immediate **RST**; a UDP datagram to a closed port gets an **ICMP port
+      unreachable** — this asymmetry is exactly how port scanners classify
+      ports. And note what `write()` returning means: only that bytes were
+      copied into the socket's **send buffer** in the kernel. Delivery — ACKs,
+      retransmits, ordering — happens later, asynchronously, inside the kernel.
+      Your app can "successfully write" to a peer that unplugged its cable
+      seconds ago and only find out on a *later* call.
     cards:
       - front: "Give two reasons you'd choose TCP over UDP."
         back: "You need reliable, ordered delivery with retransmission of lost data (e.g. web, SSH, file transfer)."
