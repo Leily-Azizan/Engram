@@ -208,6 +208,805 @@ lessons:
           4. 192.168.50.7 matches both the /24 and the default /0; the **/24 is
              more specific (longest prefix)**, so it wins.
 
+  - title: "Inside a switch: MAC learning, flooding, VLANs & spanning tree"
+    slug: inside-a-switch
+    order: 3
+    est_minutes: 30
+    summary: "The CAM-table lifecycle, collision vs broadcast domains, the 802.1Q tag on the wire, why loops melt networks, and spanning tree — plus the Linux bridge you already run under Docker."
+    body: |
+      ## From picture to mechanism
+
+      The first lesson of this chapter gave you the picture: switches learn
+      MACs, flood unknowns, and VLANs carve up broadcast domains. This lesson
+      opens the box — the exact table lifecycle, what the 802.1Q tag really
+      looks like on the wire, why a single looped cable can take a building
+      offline, and the fact that you already operate a switch every day:
+      every **Linux bridge** (including Docker's `docker0`) is one.
+
+      ## The CAM table lifecycle
+
+      The MAC address table is historically called the **CAM table** (after the
+      Content-Addressable Memory it lived in on hardware switches). Its whole
+      life is four rules:
+
+      | Event | Rule |
+      |---|---|
+      | Any frame arrives | **Learn**: record *source* MAC → ingress port, refresh its timestamp |
+      | Destination MAC known | **Forward** out exactly that one port |
+      | Unknown unicast / broadcast | **Flood** out every port in the VLAN except the ingress one |
+      | No frames from a MAC for ~300 s | **Age out**: delete the entry |
+
+      Learning is passive — the switch never asks anything, it just watches
+      source addresses. Ageing is what lets a laptop move to another port
+      without the switch forwarding into the void forever: stale entries
+      expire, the next frame floods, the reply re-teaches the new port.
+
+      ## Collision domains vs broadcast domains
+
+      Two exam terms that are really about *which device splits what*:
+
+      | Device | Splits collision domains? | Splits broadcast domains? |
+      |---|---|---|
+      | Hub (L1) | No — one shared segment | No |
+      | Switch (L2) | **Yes — every port is its own** | No (unless VLANs) |
+      | Router (L3) | Yes | **Yes** |
+
+      A **collision domain** is a segment where two devices transmitting at
+      once corrupt each other's frames. On a hub, everyone shared one; on a
+      switch, each port is private, and modern **full-duplex** links can't
+      collide at all — CSMA/CD is history. The term survives because the
+      *broadcast* domain problem is still alive: an ARP request still reaches
+      every host in the VLAN, which is exactly why VLANs exist.
+
+      ## The 802.1Q tag on the wire
+
+      Lesson 1 said "trunks tag frames." Here is what that literally means —
+      **4 bytes inserted** between the source MAC and the EtherType:
+
+      ```text
+      Untagged Ethernet frame:
+      +---------------+---------------+-----------+------------------+-----+
+      | Dst MAC (6 B) | Src MAC (6 B) | EtherType | Payload          | FCS |
+      +---------------+---------------+-----------+------------------+-----+
+
+      802.1Q-tagged frame:
+      +---------------+---------------+=================+-----------+---------+-----+
+      | Dst MAC (6 B) | Src MAC (6 B) | 802.1Q tag (4B) | EtherType | Payload | FCS |
+      +---------------+---------------+=================+-----------+---------+-----+
+                                              |
+              +-------------------------------+---------------------------+
+              | TPID = 0x8100 | PCP (3 bits) | DEI (1 bit) | VID (12 bits)|
+              |   "tagged!"   |   priority   |  drop-okay  | VLAN 1-4094  |
+              +---------------+--------------+-------------+--------------+
+      ```
+
+      The **TPID** `0x8100` sits where EtherType would be, telling the receiver
+      "a tag follows." The 12-bit **VID** gives 4096 values; 0 and 4095 are
+      reserved, hence VLANs 1–4094. **Access ports** strip/add the tag so end
+      hosts never see it; **trunk ports** keep it so the far switch knows which
+      VLAN each frame belongs to. One untagged **native VLAN** is allowed on a
+      trunk — a classic misconfiguration point when the two ends disagree.
+      Crossing between VLANs still requires a Layer-3 hop (router-on-a-stick
+      with one subinterface per VLAN, or an SVI on an L3 switch) — as
+      established in lesson 1.
+
+      ## Why loops melt networks
+
+      Plug two switches together with *two* cables (or patch a cable from a
+      wall port back into another wall port) and you've built a loop:
+
+      ```text
+          SW1 ========= SW2        one broadcast enters...
+            \\         //
+             \\       //           ...and circulates forever,
+                SW3                multiplying at every flood.
+      ```
+
+      Ethernet frames have **no TTL**. A single broadcast gets flooded by SW1
+      to SW2 and SW3, each floods it onward, copies re-arrive and are flooded
+      again — a **broadcast storm** that saturates every link within seconds.
+      Worse, the same *source* MAC now arrives on multiple ports, so the CAM
+      table **flaps** and even unicast floods. Symptoms in the wild: every port
+      LED solid on, switch CPU pegged, the whole VLAN unusable.
+
+      ## Spanning Tree Protocol: break the loop on purpose
+
+      **STP** (802.1D) lets you keep redundant cabling but logically disables
+      the loops:
+
+      1. All switches elect one **root bridge** — lowest **bridge ID** wins
+         (a 2-byte priority, default 32768, then lowest MAC as tiebreak). If
+         nobody sets priorities, the *oldest* switch tends to win by having the
+         lowest MAC — a classic incident cause.
+      2. Every other switch computes its cheapest path to the root; that port
+         becomes its **root port**.
+      3. On each link, one side is **designated** (forwarding); redundant ports
+         go **blocking** — alive, listening to BPDUs, but passing no traffic.
+
+      Classic STP ports crawl through **blocking → listening (15 s) →
+      learning (15 s) → forwarding**, so a topology change means 30–50 s of
+      outage. **RSTP** (802.1w) replaces the timers with an explicit handshake
+      between neighbors and converges in about a second; edge ports (a.k.a.
+      PortFast) go straight to forwarding. Everything modern runs RSTP or
+      better; the blocking logic is the same idea.
+
+      ## The switch on your laptop: Linux bridges
+
+      ```bash
+      sudo ip link add br0 type bridge && sudo ip link set br0 up
+      bridge link show               # ports enslaved to bridges
+      bridge fdb show br br0         # the MAC table (fdb = forwarding database)
+      ip -d link show br0            # ageing_time, stp_state, vlan_filtering...
+      ```
+
+      Docker's default network is exactly this: a bridge called `docker0`, one
+      **veth pair** per container as a "port." `bridge fdb show` on a Docker
+      host shows your containers' MACs being learned like any office switch.
+      Linux bridges even do 802.1Q (`vlan_filtering 1`) and classic STP
+      (`stp_state 1`).
+
+      ## In practice
+
+      As a DevOps engineer you rarely configure a physical switch, but you
+      debug their software twins constantly: `docker0`, Kubernetes CNI bridges,
+      libvirt's `virbr0`. "Container can't reach its neighbor" is often a
+      bridge/fdb question, and `bridge link` + `bridge fdb show` are the
+      `ip route`/`ss` of Layer 2. And when the office network dies with every
+      LED blinking in sync — you'll recognize a broadcast storm and ask who
+      plugged in what.
+    deep_dive: |
+      ### The Linux bridge data path, and STP's state machine
+
+      **Learning is a hash insert in the kernel.** When you enslave an
+      interface to a bridge, the kernel installs a receive handler
+      (`br_handle_frame`) on it. For every frame: `br_fdb_update()` hashes
+      (source MAC, VLAN) into the **fdb** — a resizable hash table — storing
+      the ingress port and a `jiffies` timestamp. Then the destination lookup:
+      a hit calls `br_forward()` to exactly one port; a miss or a
+      broadcast/multicast calls `br_flood()`, which walks the port list and
+      clones the skb once per port. That asymmetry is the whole performance
+      story of switching: known unicast = one hash lookup, flooding = one
+      packet copy per port.
+
+      **Ageing is a garbage-collector timer.** A periodic worker scans the fdb
+      and deletes entries older than `ageing_time`. `ip -d link show br0`
+      prints it in centiseconds — `ageing_time 30000` = 300 s, the same
+      default as hardware switches. Entries for the bridge's own ports are
+      marked `permanent` and never age.
+
+      **STP is a distributed election running on multicast.** Every 2 s
+      (**hello time**) switches send BPDUs to `01:80:C2:00:00:00`, carrying
+      (root bridge ID, cost to root, sender bridge ID, sender port ID). Each
+      switch keeps the *best* BPDU per port, comparing in that exact field
+      order — lowest wins at the first difference. The election needs no
+      coordinator: everyone initially claims to be root and stops claiming
+      when they hear a better BPDU. Stability hangs on three timers:
+      **hello 2 s**, **max age 20 s** (stored BPDU expires — the trigger for
+      reconvergence when the root dies silently), **forward delay 15 s**
+      (spent in *each* of listening and learning). Hence the infamous 30–50 s:
+      up to 20 s to notice + 2 × 15 s of forward delay.
+
+      **RSTP (802.1w) swaps timers for a handshake.** On point-to-point links
+      a switch sends a *proposal* ("I'll forward on this link"), the neighbor
+      *agrees* after blocking its own downstream ports (sync), and forwarding
+      starts immediately — the wave propagates outward in milliseconds per
+      hop instead of 30 s per port. States collapse to
+      discarding/learning/forwarding, and ports remember **alternate**
+      (backup root port) roles so failover doesn't need a fresh election.
+      Linux's kernel STP is classic 802.1D; real deployments needing RSTP use
+      `mstpd` alongside the bridge.
+    cards:
+      - front: "Walk through the four rules of the CAM-table lifecycle."
+        back: "Learn: source MAC → ingress port on every frame. Forward: known destination → one port only. Flood: unknown unicast/broadcast → all ports in the VLAN except ingress. Age out: entries unused for ~300 s are deleted."
+      - front: "Collision domain vs broadcast domain — which device splits which?"
+        back: "Every switch port is its own collision domain (hubs share one); only a router — or a VLAN boundary — splits broadcast domains. Full-duplex links have no collisions at all."
+      - front: "What exactly does 802.1Q add to a frame, and where?"
+        back: "A 4-byte tag between source MAC and EtherType: TPID 0x8100, 3-bit PCP (priority), 1-bit DEI, and a 12-bit VLAN ID (usable range 1-4094)."
+      - front: "Why does a Layer-2 loop melt a network when IP routing loops don't?"
+        back: "Ethernet frames have no TTL, so flooded broadcasts circulate and multiply forever (broadcast storm) and the flapping source MACs wreck the CAM table. IP packets die when TTL hits 0."
+      - cloze: "STP elects the root bridge by lowest {{c1::bridge ID}}: a priority (default {{c2::32768}}) with the lowest {{c3::MAC address}} as tiebreak."
+      - cloze: "Classic STP needs {{c1::30-50}} seconds to converge (max age + 2× forward delay); {{c2::RSTP}} (802.1w) uses a proposal/agreement handshake and converges in about a second."
+      - cloze: "On Linux, `{{c1::bridge fdb show}}` prints a bridge's MAC table, and Docker's default network hangs off a bridge named {{c2::docker0}}."
+      - front: "A switch logs the same MAC flapping between two ports and every port LED is solid. Diagnosis?"
+        back: "A Layer-2 loop / broadcast storm: circulating frames make the switch re-learn the source MAC on different ports. STP is disabled, misconfigured, or someone bypassed it with a rogue link."
+    feynman:
+      - "Explain to a junior why plugging one extra cable between two switches can take a whole floor offline, and how spanning tree prevents it."
+      - "Using the 802.1Q tag layout, explain how one physical trunk cable carries three fully isolated networks."
+    labs:
+      - title: "Build a switch from scratch: Linux bridge + namespaces"
+        slug: netplus-linux-bridge-fdb-lab
+        difficulty: core
+        est_minutes: 25
+        scenario: |
+          You keep reading "Docker plugs containers into a Linux bridge" — time
+          to build that plumbing yourself and *watch* MAC learning happen. On
+          your own machine (no network needed), create a two-port switch: a
+          Linux bridge `br0` with two network namespaces (`red`, `blue`) as
+          hosts, connected by veth pairs. Then observe the forwarding database
+          learn, and age out, their MACs.
+        deliverable: |
+          1. Create bridge `br0`, namespaces `red` and `blue`, and a veth pair
+             into each namespace; addresses 10.99.0.1/24 and 10.99.0.2/24.
+          2. Show `bridge link show` with both ports in state *forwarding*.
+          3. Show `bridge fdb show br br0` BEFORE any traffic — explain why only
+             `permanent` entries exist.
+          4. Ping from `red` to `blue`, re-run `bridge fdb show br br0`, and
+             identify the two dynamically learned entries and the port each was
+             learned on.
+          5. Lower the ageing time to 10 s, wait, and show the learned entries
+             have expired.
+          6. Tear everything down; verify with `ip link` and `ip netns list`.
+        hints: |
+          - Everything is iproute2: `ip netns add`, `ip link add ... type veth
+            peer name ...`, `ip link set <if> netns <ns>`, `ip link set <if>
+            master br0 up`.
+          - Inside a namespace, run commands with `ip netns exec red <cmd>`;
+            don't forget to bring `lo` and the veth end up.
+          - `ageing_time` is set in centiseconds: `ip link set br0 type bridge
+            ageing_time 1000` = 10 s.
+          - Deleting a namespace deletes its veth end — and a veth's peer dies
+            with it, so cleanup is short.
+        solution: |
+          ```bash
+          # --- build ---
+          sudo ip netns add red
+          sudo ip netns add blue
+          sudo ip link add br0 type bridge
+          sudo ip link set br0 up
+          sudo ip link add veth-red  type veth peer name veth-red-br
+          sudo ip link add veth-blue type veth peer name veth-blue-br
+          sudo ip link set veth-red  netns red
+          sudo ip link set veth-blue netns blue
+          sudo ip link set veth-red-br  master br0 up
+          sudo ip link set veth-blue-br master br0 up
+          sudo ip netns exec red  ip addr add 10.99.0.1/24 dev veth-red
+          sudo ip netns exec red  ip link set veth-red up
+          sudo ip netns exec red  ip link set lo up
+          sudo ip netns exec blue ip addr add 10.99.0.2/24 dev veth-blue
+          sudo ip netns exec blue ip link set veth-blue up
+          sudo ip netns exec blue ip link set lo up
+
+          bridge link show
+          # veth-red-br@if5:  ... master br0 state forwarding
+          # veth-blue-br@if7: ... master br0 state forwarding
+
+          bridge fdb show br br0
+          # only entries marked "permanent" (the bridge/port own MACs) and
+          # multicast 33:33:... — nothing learned yet: no frames have crossed.
+
+          sudo ip netns exec red ping -c 2 10.99.0.2
+
+          bridge fdb show br br0 | grep -v permanent
+          # aa:bb:cc:.. dev veth-red-br  master br0    <- red's MAC, learned
+          # de:ad:be:.. dev veth-blue-br master br0    <- blue's MAC, learned
+          # (source learning: each MAC recorded on the port its frames came in)
+
+          # --- watch ageing ---
+          sudo ip link set br0 type bridge ageing_time 1000   # 10 s
+          sleep 15
+          bridge fdb show br br0 | grep -v permanent          # learned entries gone
+
+          # --- cleanup ---
+          sudo ip netns del red      # kills veth-red AND its peer veth-red-br
+          sudo ip netns del blue
+          sudo ip link del br0
+          ip netns list; ip link show | grep -E 'br0|veth'    # both empty
+          ```
+          The first ping's ARP request is a broadcast — flooded to all ports —
+          and it *teaches* the bridge red's MAC. Blue's ARP reply teaches the
+          bridge blue's MAC, so the actual ICMP echo is already pure unicast.
+          That flood-then-learn bootstrap is the entire magic of switching.
+
+  - title: "Routing protocols: distance-vector vs link-state (RIP, OSPF)"
+    slug: routing-protocols-igp
+    order: 4
+    est_minutes: 30
+    summary: "How routers fill the table automatically: RIP's routing-by-rumor and its failure modes, OSPF's flooded map + Dijkstra, administrative distance, and the real route-selection order."
+    body: |
+      ## Who fills the routing table?
+
+      The previous lesson ended with a one-liner: static routes are predictable
+      but blind, dynamic protocols adapt. Static is still the right answer more
+      often than people admit — a host's default route, a site with one uplink,
+      a security path that must never change. The moment you have **redundant
+      paths** and want automatic failover, you need a routing protocol. Inside
+      one organisation that's an **IGP** (Interior Gateway Protocol), and there
+      are exactly two families to understand.
+
+      ## Distance vector: routing by rumor (RIP)
+
+      A **distance-vector** router knows only what its neighbors tell it:
+      "I can reach network X at cost N." It adds its own link cost and keeps
+      the best rumor per prefix. **RIP** is the teaching example:
+
+      - Broadcasts its **entire routing table every 30 seconds**, to neighbors
+        only.
+      - Metric = **hop count**, maximum **15** (16 means unreachable) — a
+        10 Gbit/s path with 3 hops loses to a 1 Mbit/s path with 2.
+      - No map of the network exists anywhere. Nobody knows the topology; they
+        know distances.
+
+      The failure mode is famous. Say `A --- B --- C` and C's LAN dies:
+
+      ```text
+      B knew C's LAN at 1 hop; C withdraws it.
+      But A still advertises "C's LAN, 2 hops" (its stale route via B).
+      B believes A:  "3 hops, via A"  -> traffic loops A <-> B
+      A updates from B: "4 hops" ... and they count up to 16 together.
+      ```
+
+      This is **count-to-infinity**. The band-aids: **split horizon** (never
+      advertise a route back out the interface you learned it from),
+      **poison reverse** (advertise it back with metric 16), and hold-down
+      timers. They slow the disease, they don't cure it — RIP convergence is
+      measured in minutes. Nobody runs RIP in production; you learn it because
+      it makes OSPF's design make sense, and because it still appears on exams
+      and ancient lab gear.
+
+      ## Link state: everyone gets the map (OSPF)
+
+      **Link-state** flips the model. Every router floods small
+      **LSAs** (link-state advertisements) — "here are my links and their
+      costs" — until every router in the area holds an **identical link-state
+      database**: the actual map. Then each router *independently* runs
+      **Dijkstra's SPF algorithm** with itself as root and installs the
+      results. **OSPF** is the enterprise IGP:
+
+      - Updates are **triggered by change**, not periodic; a link failure means
+        one small LSA flood plus one SPF run — convergence in well under a
+        second on modern gear.
+      - **Cost** = reference bandwidth ÷ interface bandwidth (default reference
+        100 Mbit/s — tune it, or 10 G and 100 G links both round to cost 1 and
+        look identical).
+      - Routers discover each other with **hello** packets (every 10 s on LANs,
+        neighbor declared dead after 40 s) before exchanging databases.
+      - **Areas** bound the flooding: LSDB and SPF are per-area, and every
+        non-backbone area attaches to **area 0** (the backbone).
+
+      | | Distance vector (RIP) | Link state (OSPF) |
+      |---|---|---|
+      | Router knows | distances via neighbors | the whole topology |
+      | Updates | full table, every 30 s | LSAs, on change |
+      | Algorithm | Bellman-Ford-ish | Dijkstra SPF |
+      | Metric | hop count (max 15) | bandwidth-based cost |
+      | Convergence | minutes | sub-second to seconds |
+      | Failure mode | count-to-infinity | more CPU/state per router |
+
+      ## Administrative distance: which *protocol* to believe
+
+      One router can learn the *same prefix* from several sources. Before
+      metric even matters, the router ranks the **source** by
+      **administrative distance** (lower = more trusted; Cisco defaults):
+
+      | Source | AD |
+      |---|---|
+      | Connected interface | 0 |
+      | Static route | 1 |
+      | eBGP | 20 |
+      | OSPF | 110 |
+      | RIP | 120 |
+      | iBGP | 200 |
+
+      ## The precedence that trips everyone
+
+      For a given packet, selection happens in this order — and only this
+      order:
+
+      1. **Longest prefix wins FIRST.** A /28 beats a /24 for addresses inside
+         it, no matter who provided each route.
+      2. Same prefix from different protocols → **lowest AD** decides which one
+         is installed in the table at all.
+      3. Same prefix, same protocol → **best metric**.
+
+      Example: OSPF (AD 110) offers `10.1.2.0/24`, RIP (AD 120) offers
+      `10.1.2.0/28`. A packet to `10.1.2.5` follows **RIP's /28** — AD never
+      enters the comparison, because these are *different prefixes*. AD only
+      breaks ties between identical ones.
+
+      ## On Linux
+
+      Production routers are very often Linux boxes running **FRRouting**
+      (FRR) or **BIRD** — full OSPF/BGP suites that install their results into
+      the kernel table you already read with `ip route`. The `proto` field
+      names who installed each route:
+
+      ```bash
+      ip route show
+      # default via 192.168.1.1 dev wlan0 proto dhcp metric 600
+      # 10.10.0.0/24 via 10.0.0.2 dev eth0 proto ospf metric 20
+      # 10.20.0.0/24 via 10.0.0.6 dev eth1 proto bird
+      ```
+
+      ## In practice
+
+      Data-center underlays, VPN failover, and container platforms all lean on
+      these ideas: when someone says "the backup link didn't take over," your
+      first questions are *what protocol, what metric, what AD*. Cloud VPC
+      route tables are essentially static routing you manage through an API —
+      which is exactly why cloud networks feel simple until you connect them to
+      a real OSPF/BGP network on-prem. And the precedence rule (prefix → AD →
+      metric) is the single most useful routing fact for debugging "why did the
+      packet go *there*?"
+    deep_dive: |
+      ### Dijkstra by hand: one SPF run, step by step
+
+      Every OSPF router in an area holds the same map and runs SPF rooted at
+      itself. Here's the map (link costs on the edges):
+
+      ```text
+          R1 ----2---- R2 ----4---- R4
+           \           |            |
+            5          1            1
+             \         |            |
+              `------- R3 ----3---- R5
+      ```
+
+      SPF from **R1** keeps two sets: **confirmed** (final shortest paths) and
+      **tentative** (best seen so far). Each step confirms the cheapest
+      tentative node, then *relaxes* its neighbors:
+
+      ```text
+      Step | Confirm      | Tentative afterwards (cost, first hop)
+      -----+--------------+------------------------------------------------
+       1   | R1 = 0       | R2 (2, via R2)   R3 (5, via R3)
+       2   | R2 = 2       | R3 (3, via R2!)  R4 (6, via R2)
+       3   | R3 = 3       | R4 (6, via R2)   R5 (6, via R2)   [3 + 3 via R3]
+       4   | R4 = 6       | R5 (6, via R2)   [via R4 would be 7 -- no change]
+       5   | R5 = 6       | (empty -- done)
+      ```
+
+      The interesting moment is step 2: the *direct* link R1–R3 costs 5, but
+      going R1→R2→R3 costs 2 + 1 = 3, so the tentative entry for R3 is
+      **replaced**. That's relaxation, and it's exactly what hop-counting RIP
+      cannot express: more hops, cheaper path. The final tree sends *all* of
+      R1's traffic via R2 — the R1–R3 link carries nothing and exists purely
+      as insurance.
+
+      Why the result is loop-free: nodes are confirmed in non-decreasing cost
+      order, and each node's path goes only through already-confirmed nodes —
+      a cycle would require revisiting a confirmed node with a higher cost,
+      which the algorithm never does.
+
+      Now kill R2. Every neighbor notices (dead timer or carrier loss), floods
+      updated LSAs, and each router reruns SPF on the corrected map. R1's new
+      results: R3 = 5 (direct), R5 = 8 (via R3), R4 = 9 (via R3, R5). One
+      flood, one computation, no rumor propagation, no counting — *this* is
+      why link-state converges in milliseconds where distance-vector takes
+      minutes. SPF is O(E log V); a few hundred nodes is trivial for a modern
+      CPU, which is why OSPF areas today are more about bounding LSA flooding
+      and churn than saving CPU.
+    cards:
+      - cloze: "RIP advertises its {{c1::entire routing table}} every {{c2::30}} seconds, and its maximum metric is {{c3::15}} hops (16 = unreachable)."
+      - front: "What is count-to-infinity, and which two RIP mechanisms fight it?"
+        back: "After a network dies, DV routers re-learn the dead route from each other's stale advertisements, incrementing the metric until 16. Split horizon (don't advertise a route back out the interface it was learned on) and poison reverse (advertise it back with metric 16) reduce it."
+      - front: "One sentence each: how do distance-vector and link-state routers learn the network?"
+        back: "DV: trust neighbors' summaries ('routing by rumor') — you know distances, never the map. LS: flood link-state advertisements until every router holds an identical map, then each runs Dijkstra itself."
+      - cloze: "OSPF routers flood {{c1::LSAs}} to build an identical {{c2::link-state database}} per area, then each runs {{c3::Dijkstra}} (SPF) rooted at itself; all non-backbone areas attach to area {{c4::0}}."
+      - front: "Administrative distances for: connected, static, eBGP, OSPF, RIP?"
+        back: "0, 1, 20, 110, 120 — and iBGP is 200. Lower = more trusted; AD picks between protocols offering the same prefix."
+      - front: "OSPF offers 10.1.2.0/24 and RIP offers 10.1.2.0/28. Where does a packet to 10.1.2.5 go, and why?"
+        back: "Via RIP's /28. Longest prefix match runs FIRST; administrative distance only breaks ties between identical prefixes, and metric only within the same protocol."
+      - cloze: "OSPF cost = {{c1::reference bandwidth}} ÷ interface bandwidth (default reference {{c2::100 Mbit/s}}); neighbors are kept alive by {{c3::hello}} packets."
+    feynman:
+      - "Explain 'routing by rumor' vs 'everyone gets the map' to a junior, and why the map version converges faster after a link failure."
+      - "A path with MORE hops won because its total OSPF cost was lower. Explain to a skeptical colleague why that's correct, using link bandwidths."
+    labs:
+      - title: "Compute an OSPF network by hand"
+        slug: netplus-ospf-spf-by-hand-lab
+        difficulty: challenge
+        est_minutes: 30
+        scenario: |
+          Your team is rolling out OSPF (via FRR) across five routers. Before
+          anyone touches a config, your lead wants proof the design behaves:
+          predict exactly what OSPF will compute. Pen, paper, and reasoning
+          only — this is the same SPF run every router will perform.
+
+          ```text
+              A ---10--- B ---10--- C
+              |          |          |
+             100        10         10
+              |          |          |
+              D ---10--- E ---------+
+          ```
+
+          Links and costs: A-B 10, B-C 10, B-E 10, C-E 10, D-E 10, A-D 100
+          (a slow backup circuit). Each router serves one LAN:
+          A = 10.0.1.0/24, B = 10.0.2.0/24, C = 10.0.3.0/24, D = 10.0.4.0/24,
+          E = 10.0.5.0/24.
+        deliverable: |
+          1. Run SPF from A on paper: show the confirmed/tentative table step
+             by step (like the deep dive).
+          2. Write A's routing table: each remote LAN → next hop + total cost.
+          3. Write D's final routing table (no need to show every step).
+          4. Name the link that carries no traffic in steady state and justify
+             its existence.
+          5. Failure drill: the A-B link dies. Recompute A's table and state,
+             in one sentence, why every destination's next hop changed.
+        hints: |
+          - Always confirm the cheapest tentative node next; then relax its
+            neighbors (can you improve their tentative cost through it?).
+          - For D, notice the 100-cost link: is A ever best reached directly?
+          - After the failure, A has exactly one working link left.
+        solution: |
+          **SPF from A:** confirm A=0 → tentative B(10), D(100). Confirm B=10 →
+          C(20 via B), E(20 via B). Confirm C=20 (E stays 20). Confirm E=20 →
+          D improves: 20+10 = **30 via B** (beats direct 100 — replace!).
+          Confirm D=30. Done.
+
+          **A's table:** 10.0.2.0/24 via B cost 10 · 10.0.3.0/24 via B cost 20 ·
+          10.0.5.0/24 via B cost 20 · 10.0.4.0/24 via B cost 30. Every route's
+          first hop is B.
+
+          **D's table:** E=10 (direct), B=20 via E, C=20 via E, A=**30 via E**
+          (10+10+10 beats the direct 100). So: 10.0.5.0/24 via E (10),
+          10.0.2.0/24 via E (20), 10.0.3.0/24 via E (20), 10.0.1.0/24 via E (30).
+
+          **Idle link:** A-D. Both endpoints prefer the three-hop path through
+          B/E (cost 30) over the direct cost-100 circuit. It exists as a
+          backup — capacity you pay for precisely so it can sit idle.
+
+          **A-B failure:** A's only remaining link is A-D, so *everything*
+          funnels over the backup: D = 100 (direct), E = 110 (via D),
+          B = 120 (via D, E), C = 120 (via D, E). Every next hop is now D —
+          one LSA flood + one SPF rerun per router, no count-to-infinity,
+          convergence in about a second. (RIP could not even represent these
+          paths: cost 120 exceeds nothing, but a 15-hop limit isn't the issue —
+          its 30-second rumor cycle is.)
+
+  - title: "BGP: how the Internet routes between organizations"
+    slug: bgp-internet-routing
+    order: 5
+    est_minutes: 28
+    summary: "Autonomous systems, path-vector routing, policy over shortest-path (local-pref, MED, prepending), hijacks and slow convergence — and where cloud engineers meet BGP."
+    body: |
+      ## The Internet is a federation, not a network
+
+      Inside one organisation, OSPF computes shortest paths on a shared map.
+      That model dies at the organisation's edge: no ISP will flood its
+      internal topology to competitors, and "shortest" means nothing when
+      every link crossing costs somebody money. The Internet is ~80,000
+      **autonomous systems** (AS) — networks under single administrative
+      control, each with its own policy — identified by an **ASN**. ASNs were
+      16-bit, now 32-bit; the private range **64512–65534** is the RFC-1918 of
+      AS numbers (you'll see it in every lab and in cloud defaults — AWS's VPN
+      default is 64512).
+
+      Between ASes runs exactly one protocol: **BGP-4**, essentially unchanged
+      since 1994. It's almost aggressively simple plumbing: a **TCP session on
+      port 179** between two manually configured peers — no discovery, no
+      multicast — over which they exchange routes and incremental updates.
+
+      - **eBGP** — a session between different ASes (AD 20).
+      - **iBGP** — sessions inside one AS that carry external routes across it
+        (AD 200; your IGP still handles internal prefixes).
+
+      ## Path vector: the route carries its history
+
+      BGP is a **path-vector** protocol. A route isn't a cost — it's the list
+      of ASes it traversed, the **AS-path**. Each AS prepends its own ASN when
+      advertising a route onward:
+
+      ```text
+      origin 64496 announces 203.0.113.0/24
+        -> ISP 64500 hears path [64496]
+        -> 64500 advertises to 64599: path [64500 64496]
+        -> 64599 advertises onward:   path [64599 64500 64496]
+      ```
+
+      Loop prevention falls out for free: **if your own ASN is already in the
+      path, reject the route.** No TTLs, no split horizon — just history.
+
+      ## Policy beats shortest path
+
+      BGP's best-path selection is designed so *business policy* wins before
+      path length. The economics: customers pay providers for **transit**;
+      **peers** exchange traffic settlement-free. So every AS prefers routes
+      via customers (revenue) over peers (free) over providers (cost) — even
+      when the provider path is shorter. The practical knobs:
+
+      | Knob | Influences | Rule |
+      |---|---|---|
+      | **local-preference** | *outbound* — which exit your AS uses | higher wins; shared AS-wide via iBGP |
+      | **AS-path prepending** | *inbound* — how others reach you | pad your announcement with extra copies of your own ASN so that path looks longer |
+      | **MED** | *inbound*, only between multiple links to the *same* neighbor AS | lower wins; a polite suggestion, often ignored |
+
+      Local-pref is evaluated **before** AS-path length, which is the whole
+      point: "always exit via the cheap ISP" beats "shortest path."
+
+      ## Why convergence is slow
+
+      The global IPv4 table is over a million routes, and there is no shared
+      map — only ripples of updates from neighbor to neighbor. When a prefix
+      is withdrawn, routers **path hunt**: try the next-best stale path,
+      advertise it, have it withdrawn, try the next — each step rate-limited
+      by batching timers (MRAI, traditionally up to 30 s). Global convergence
+      after a failure takes tens of seconds to minutes, versus OSPF's
+      sub-second. Design consequence: BGP failover is *not* instant, which is
+      why serious setups pre-establish backup sessions and why anycast relies
+      on health-checked withdrawals rather than fast re-routing.
+
+      ## When it goes wrong: hijacks and leaks
+
+      Classic BGP has no built-in check that you *own* what you announce. The
+      canonical incident pattern (Pakistan Telecom vs YouTube, 2008): an AS
+      announces a **more-specific prefix** than the legitimate origin — say a
+      /24 carved from someone's /22 — and, because **longest prefix wins
+      first** (chapter rule!), the whole Internet immediately prefers the
+      hijacker. A **route leak** is the accidental cousin: re-advertising
+      routes learned from one provider to another, silently becoming transit
+      for traffic you never provisioned for. The modern countermeasure is
+      **RPKI** origin validation — cryptographically signed statements that
+      "AS X may originate prefix Y" — widely deployed at large carriers, still
+      not universal.
+
+      ## Where you, a DevOps engineer, actually meet BGP
+
+      - **Cloud interconnects.** AWS Direct Connect and Azure ExpressRoute are
+        literally eBGP sessions between your edge router and the cloud's; you
+        will pick ASNs, announce prefixes, and occasionally prepend.
+      - **Kubernetes.** MetalLB in BGP mode announces Service IPs to your
+        top-of-rack routers; Calico can peer BGP with the fabric to distribute
+        pod routes without encapsulation.
+      - **Anycast.** The same prefix announced from many sites; BGP path
+        selection sends each user to the topologically nearest one — how root
+        DNS and CDNs work (the DNS chapter picks this up).
+      - **Hybrid networks.** VPC route tables are static; the moment routes
+        must be exchanged dynamically (VPN gateways, transit gateways), BGP is
+        doing it under the hood, and its limits (prefix quotas, convergence
+        lag) become *your* incident.
+
+      ## In practice
+
+      You will probably never run the Internet's BGP — but you will debug a
+      Direct Connect session stuck in `Idle`, explain why a failover took 90
+      seconds, or read a looking glass to prove "the problem is not us." BGP
+      literacy is what separates "the network is down" from "our prefix lost
+      its announcement on the primary path at 14:02."
+    deep_dive: |
+      ### The best-path algorithm, and how to read a looking glass
+
+      A BGP router stores *every* valid path it hears and marks exactly one
+      per prefix as **best** — only that one is installed in the routing table
+      and advertised onward. The decision walks an ordered list; **the first
+      difference wins** (Cisco flavor; other vendors differ mainly in step 1):
+
+      ```text
+      1. highest WEIGHT            (Cisco-only, local to this one router)
+      2. highest LOCAL-PREFERENCE  (policy, shared across the AS)
+      3. locally originated routes (I announced it myself)
+      4. shortest AS-PATH          (finally, "distance")
+      5. lowest ORIGIN code        (IGP < EGP < incomplete)
+      6. lowest MED                (only vs. the same neighbor AS)
+      7. eBGP over iBGP            (prefer leaving the AS directly)
+      8. lowest IGP cost to the BGP next hop   ("hot potato" -- exit ASAP)
+      9. oldest route, then lowest router ID   (deterministic tiebreaks)
+      ```
+
+      Notice AS-path length is only step **4** — two policy knobs outrank it.
+      That ordering *is* the Internet's economics encoded in software.
+
+      A route in a looking glass (`show ip bgp <prefix>` style, annotated):
+
+      ```text
+      R1# show ip bgp 203.0.113.0/24
+      BGP routing table entry for 203.0.113.0/24, version 8341
+      Paths: (2 available, best #1)
+        64500 64496                        <- AS-path: via 64500, origin 64496
+          192.0.2.1 from 192.0.2.1 (10.255.0.1)
+                                           <- next hop / peer (peer router-ID)
+          Origin IGP, localpref 200, valid, external, best
+                                           ^^^^^^^^^^^^^ step 2 decided "best"
+        64510 64496 64496 64496 64496      <- 64496 prepended itself 3 extra
+          198.51.100.1 from 198.51.100.1 (10.255.0.2)
+          Origin IGP, localpref 100, valid, external
+      ```
+
+      Reading it: both paths are valid and *kept* (that's why BGP routers need
+      gigabytes of RAM); path 1 wins at step 2 (localpref 200 > 100) so
+      AS-path length is never even consulted. If the localprefs were equal,
+      path 1 would still win at step 4 (path length 2 vs 5 — the prepending
+      doing its job from the far side).
+
+      Public looking glasses (route-views.org, RIPE RIS) give you this exact
+      view from *inside real ISPs* — the standard way to answer "is our prefix
+      visible? from where? did someone announce a more-specific?" during an
+      incident, from outside your own network.
+    cards:
+      - cloze: "BGP peers speak over {{c1::TCP}} port {{c2::179}}; eBGP has administrative distance {{c3::20}}, iBGP {{c4::200}}."
+      - front: "How does BGP prevent routing loops?"
+        back: "Path vector: every AS prepends its ASN to the AS-path when advertising onward, and a router rejects any route whose path already contains its own ASN."
+      - front: "Which attribute controls your AS's outbound exit choice, and how does it rank against AS-path length?"
+        back: "local-preference — higher wins, distributed AS-wide via iBGP, and it is evaluated BEFORE AS-path length. Policy outranks distance by design."
+      - front: "You want inbound traffic to avoid your backup link while it stays available for failover. Standard technique?"
+        back: "AS-path prepending: announce your prefix on the backup with your own ASN repeated several times, so remote ASes see a longer path and prefer the primary — until it's withdrawn."
+      - cloze: "The 2008 YouTube hijack pattern: announce a {{c1::more-specific}} prefix, which the whole Internet prefers by {{c2::longest-prefix match}}; the countermeasure is {{c3::RPKI}} origin validation."
+      - front: "Why does BGP converge in minutes when OSPF converges in under a second?"
+        back: "There's no shared map to recompute — withdrawals ripple AS-by-AS, rate-limited by batching timers (MRAI), while routers 'path hunt' through successively worse stale alternatives. Over a million prefixes amplify the churn."
+      - front: "Name three places a DevOps/cloud engineer directly touches BGP."
+        back: "Cloud interconnects (Direct Connect / ExpressRoute are eBGP sessions), Kubernetes load-balancing (MetalLB BGP mode, Calico peering), and anycast services — plus dynamic routing on VPN/transit gateways."
+    feynman:
+      - "Explain to a junior why the Internet's routing protocol chooses paths by policy and money rather than by speed — with the customer/peer/provider example."
+      - "Walk through how announcing a more-specific prefix hijacks traffic, reusing the longest-prefix-match rule from earlier in this chapter."
+    labs:
+      - title: "Paper-lab: multi-homing an AS with a backup that behaves"
+        slug: netplus-bgp-paper-as-lab
+        difficulty: challenge
+        est_minutes: 30
+        scenario: |
+          You run AS 64496, announcing 203.0.113.0/24. A new contract makes you
+          multi-homed: a fast primary link to ISP-A (AS 64500) and a cheap
+          backup to ISP-B (AS 64510). Both ISPs connect to the rest of the
+          Internet, represented here by AS 64599:
+
+          ```text
+                    +------------ AS 64599 ------------+
+                    |       (rest of the Internet)     |
+                    |                                  |
+                AS 64500                           AS 64510
+                 (ISP-A)                            (ISP-B)
+                    |                                  |
+                 primary                            backup
+                    |                                  |
+                    +---------- AS 64496 --------------+
+                          203.0.113.0/24  (you)
+          ```
+
+          The ticket: "ALL traffic must use ISP-A in both directions. ISP-B
+          must carry traffic only while the ISP-A link is down. No manual
+          intervention during failover." Solve it on paper — the reasoning is
+          identical to what you'd type into FRR.
+        deliverable: |
+          1. With no policy at all: list the AS-paths AS 64599 sees for
+             203.0.113.0/24 and explain why you cannot predict which it picks.
+          2. Outbound fix: which attribute do you set, where, and with what
+             values, so all your egress uses ISP-A?
+          3. Inbound fix: what do you change on which announcement? Write the
+             exact AS-path 64599 sees via each ISP after the change, and which
+             it now picks (cite the decision step).
+          4. Failure drill: the 64496-64500 link goes down. Describe the
+             sequence — session, withdrawal, 64599's new table — for both
+             directions, and roughly how long the world takes to switch.
+          5. Explain why MED could NOT have solved the inbound half.
+        hints: |
+          - No policy = both paths tie on local-pref AND AS-path length; what's
+            left is arbitrary tiebreaks you don't control.
+          - Outbound is local-pref (higher wins). Inbound is prepending — you
+            can only make a path look WORSE, not force a choice.
+          - MED is only compared between routes from the SAME neighbor AS.
+        solution: |
+          **1.** 64599 sees `64500 64496` and `64510 64496` — both length 2,
+          equal local-pref. Selection falls through to tiebreaks (oldest route,
+          lowest router ID) that you neither see nor control: traffic could use
+          either link, or flap between them after resets. That's the problem.
+
+          **2. Outbound:** on your routers, set **local-preference 200** on all
+          routes learned from ISP-A and **100** on routes from ISP-B. Local-pref
+          is step 2 of the decision — evaluated before AS-path — so every
+          egress flow exits via ISP-A while its session is up.
+
+          **3. Inbound:** apply **AS-path prepending** on the announcement to
+          ISP-B only: advertise 203.0.113.0/24 with path `64496 64496 64496
+          64496`. Now 64599 compares:
+          `64500 64496` (length 2) vs `64510 64496 64496 64496 64496`
+          (length 5) — equal local-pref, so **step 4 (shortest AS-path)** picks
+          ISP-A. Same prefix both ways, so longest-prefix doesn't interfere.
+
+          **4. Failure:** the eBGP session to 64500 drops (hold timer expires
+          or the interface dies). Your side stops using ISP-A routes — egress
+          immediately follows the only remaining paths, via ISP-B (local-pref
+          100 is now the best that exists). ISP-A withdraws `64500 64496` from
+          64599; 64599's only remaining path is the prepended one via 64510 —
+          long, but the *only* candidate, so inbound flips to the backup.
+          Expect seconds (hold timer up to ~90 s by default, often tuned lower,
+          plus MRAI-paced propagation) — not OSPF-fast, which is why the ticket
+          says "backup," not "load-balancing."
+
+          **5. MED fails here** because it's only compared between routes
+          received from the **same neighbor AS** (step 6). Your two
+          announcements arrive at 64599 via two *different* ASes (64500 and
+          64510), so 64599 never compares their MEDs. MED would work only if
+          you had two links to the *same* ISP.
+
 quiz:
   title: "Switching & Routing — chapter exam"
   slug: netplus-switching-routing-exam

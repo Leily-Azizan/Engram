@@ -33,6 +33,14 @@ lessons:
       | 389 | LDAP | TCP | Directory services |
       | 443 | HTTPS | TCP | Web (TLS-encrypted) |
       | 3389 | RDP | TCP | Remote Desktop |
+      | 445 | SMB | TCP | Windows file sharing / Samba |
+      | 465/587 | SMTPS / Submission | TCP | Sending email over TLS (client → server) |
+      | 993 | IMAPS | TCP | IMAP over TLS |
+      | 995 | POP3S | TCP | POP3 over TLS |
+      | 3306 | MySQL / MariaDB | TCP | Database |
+      | 5432 | PostgreSQL | TCP | Database |
+      | 6379 | Redis | TCP | Cache / queue / key-value store |
+      | 8080/8443 | HTTP-alt / HTTPS-alt | TCP | Proxies, app servers, dev instances |
 
       ### Secure vs insecure pairs
 
@@ -114,11 +122,1075 @@ lessons:
              ss -tlnp | grep ':443'
              ```
 
+  - title: "UDP: the minimal transport"
+    slug: udp-minimal-transport
+    order: 2
+    est_minutes: 25
+    summary: "The entire 8-byte protocol — what UDP deliberately doesn't do, why that's a feature, and how to spot silent datagram loss."
+    body: |
+      ## UDP adds almost nothing to IP — on purpose
+
+      Chapter 1 introduced TCP vs UDP at the model level. Now open the hood. IP
+      delivers packets host-to-host, best-effort. **UDP** adds exactly one thing:
+      **ports**, so the kernel can hand the payload to the right *process*. That,
+      plus a checksum, is the entire protocol. The header is **8 bytes**:
+
+      ```text
+       0              15 16             31
+      +----------------+----------------+
+      |  source port   |    dest port   |
+      +----------------+----------------+
+      |     length     |    checksum    |
+      +----------------+----------------+
+      |           payload ...           |
+      ```
+
+      Four 16-bit fields. Compare TCP's 20+ bytes of sequence numbers, ACKs,
+      windows, and flags. Everything TCP's header machinery buys, UDP refuses:
+
+      - **No ordering** — datagrams can arrive in any order (or twice).
+      - **No reliability** — a lost datagram is just gone. Nobody retransmits.
+      - **No backpressure** — the sender never slows down; if the receiver can't
+        keep up, the kernel **silently drops** datagrams on the floor.
+      - **No connection** — no handshake, no state, no teardown. The first packet
+        can carry data.
+
+      ## What refusing all that buys
+
+      **Demultiplexing without bookkeeping.** A UDP socket is identified by
+      `(local-IP, local-port)` — the kernel hashes the destination port of each
+      arriving datagram and appends it to that socket's receive queue. One socket,
+      thousands of clients, zero per-client state. This is why a single `dnsmasq`
+      or `chronyd` process serves an entire office from one socket.
+
+      **Zero round trips before data.** A DNS query is one datagram out, one back.
+      With TCP it would be: handshake (1 RTT), query, response, teardown — triple
+      the latency for a 60-byte question.
+
+      **Message boundaries.** One `sendto()` = one datagram = one `recvfrom()`.
+      TCP gives you a byte stream and makes *you* invent framing (next lessons).
+
+      ## Who builds on UDP, and why loss is fine for them
+
+      | Service | Why UDP fits |
+      |---------|--------------|
+      | **DNS** (53) | One-shot query/response; the resolver just retries after a timeout |
+      | **DHCP** (67/68) | Client has *no IP address yet* — it broadcasts; a TCP connection is impossible without an address |
+      | **NTP** (123) | A retransmitted timestamp is a *wrong* timestamp; better to drop and re-ask |
+      | **syslog** (514), StatsD/metrics | Losing one log line beats blocking the app that emits it |
+      | **QUIC / HTTP/3** (443) | Uses UDP as a raw packet API and rebuilds reliability, ordering, and encryption *in userspace* — deployable without touching kernels or middleboxes |
+
+      The pattern: loss is fine when the data is **idempotent and retryable**
+      (DNS), **stale-worthless** (NTP, live audio/video, game state — a late
+      packet is useless, don't wait for it), or **fire-and-forget telemetry**
+      (metrics, logs) where the sender must never block.
+
+      ## UDP vs TCP: a service-design decision table
+
+      | Question | If yes → |
+      |----------|----------|
+      | Must every byte arrive, in order? | TCP |
+      | Is the exchange one small request/response, retried by the app? | UDP |
+      | Is old data worthless once late (real-time)? | UDP |
+      | Do you need to broadcast/multicast? | UDP (TCP can't) |
+      | Long-lived conversation with large transfers? | TCP |
+      | Sender must never block on a slow receiver? | UDP — but *you* accept the drops |
+
+      ## Where UDP loss hides on your own box
+
+      No backpressure means the receiving kernel drops datagrams when the socket's
+      receive buffer is full — the app was too slow to `recvfrom()`. Nothing is
+      logged. The evidence:
+
+      ```bash
+      ss -u -anp                 # Recv-Q column: bytes waiting in each UDP socket
+      cat /proc/net/udp          # last column "drops" — per-socket drop counter
+      nstat -az UdpRcvbufErrors  # global count of buffer-full drops
+      ```
+
+      A climbing `drops` counter on your metrics collector's socket is the classic
+      "our graphs have holes but nothing errored" incident.
+
+      ## In practice — why you care as a DevOps engineer
+
+      - Firewalls and `conntrack` fake "connections" for UDP with timeouts — a
+        long-quiet UDP flow can get its NAT mapping expired mid-conversation.
+      - When a UDP service "doesn't respond", there's no RST to help you: the only
+        signal is an ICMP *port unreachable* (if not filtered) or pure silence.
+      - Sizing `net.core.rmem_max` / `SO_RCVBUF` on busy collectors (StatsD,
+        syslog) is a real tuning task — watch `UdpRcvbufErrors` before and after.
+      - QUIC means "UDP 443 outbound" now matters in every firewall discussion.
+    deep_dive: |
+      ### The kernel path of a datagram — and where it silently dies
+
+      **Receive path.** NIC → IP layer → `udp_rcv()`. The kernel hashes
+      `(dst-port, dst-IP)` into the UDP socket table and finds the matching socket.
+      Then the single point of failure: `sock_queue_rcv_skb()` checks whether the
+      socket's receive buffer (`sk_rcvbuf`, set by `SO_RCVBUF`, capped by
+      `net.core.rmem_max`) has room. If yes, the datagram is queued and the
+      process is woken. If no, the datagram is **freed** — the sender is not told,
+      the app is not told; only `UDP_MIB_RCVBUFERRORS` is incremented (that's the
+      number `nstat -az UdpRcvbufErrors` and the `drops` column of
+      `/proc/net/udp` expose). The drop is *cheaper* than TCP's reaction on
+      purpose: UDP's contract is "best effort", so the kernel keeps none of the
+      machinery needed to do better.
+
+      **The checksum covers more than the datagram.** UDP's checksum is computed
+      over a **pseudo-header** borrowed from IP: source IP, destination IP,
+      protocol number (17), and UDP length — plus the real header and payload. So
+      it detects not only corruption but *misdelivery* (a datagram that arrived at
+      the wrong host). In IPv4 the checksum is optional (0 = "not computed"); in
+      IPv6 it's mandatory because IPv6 dropped the IP-header checksum entirely.
+
+      **Connected UDP sockets.** `connect()` on a UDP socket transfers no packets
+      — it just pins the peer address into the socket. Two effects: (1) `send()`
+      can skip per-call route lookups, and (2) **ICMP errors come back to you**. If
+      you send to a port where nothing listens, the target replies ICMP type 3
+      code 3 (*port unreachable*); on a connected socket the kernel stores it and
+      your **next** `send()`/`recv()` fails with `ECONNREFUSED`. On an unconnected
+      socket the error is discarded — genuine silence. This one-send-late,
+      only-if-connected behaviour is why UDP failures feel so ghostly in
+      production.
+
+      **Datagram size vs the MTU.** One datagram larger than the path MTU gets
+      **fragmented at the IP layer**, and if *any* fragment is lost, the whole
+      datagram is lost (and there's no retransmit). That's why sane UDP protocols
+      keep payloads ≤ ~1472 bytes (1500 Ethernet MTU − 20 IP − 8 UDP), and why
+      classic DNS capped answers at 512 bytes before EDNS0 (chapter 5 takes DNS
+      from here). QUIC simply refuses to send datagrams that would fragment.
+    cards:
+      - front: "Name the four fields of the UDP header and its total size."
+        back: "Source port, destination port, length, checksum — four 16-bit fields, 8 bytes total."
+      - front: "List three things TCP provides that UDP deliberately omits."
+        back: "Ordering, reliability (retransmission), and flow/congestion control (backpressure) — plus connection state itself."
+      - front: "Why *must* DHCP use UDP rather than TCP?"
+        back: "The client has no IP address yet and must broadcast; TCP requires an established endpoint-to-endpoint connection, which is impossible without an address."
+      - front: "A UDP datagram arrives but the app is reading too slowly and the socket buffer is full. What happens, and where is the evidence?"
+        back: "The kernel silently drops it. Evidence: the drops column in /proc/net/udp (per socket) and `nstat -az UdpRcvbufErrors` (global). Nothing is sent to the sender."
+      - front: "How does 'connection refused' manifest for UDP?"
+        back: "The target sends ICMP port unreachable; on a connected UDP socket the *next* send/recv fails with ECONNREFUSED. On an unconnected socket, the error is discarded — you see nothing."
+      - front: "Why does QUIC (HTTP/3) run over UDP instead of being a new IP protocol or a TCP extension?"
+        back: "Deployability: UDP passes through existing kernels, NATs, and middleboxes. QUIC rebuilds reliability, ordering, and encryption in userspace on top of it."
+      - cloze: "The UDP checksum is computed over a {{c1::pseudo-header}} that includes the source and destination {{c2::IP addresses}}, so it also detects misdelivery."
+      - cloze: "The largest UDP payload that avoids IP fragmentation on a standard 1500-byte Ethernet MTU is about {{c1::1472}} bytes (1500 − 20 IP − 8 UDP)."
+    feynman:
+      - "Explain to a junior why your metrics agent ships data over UDP, what you gain, and exactly what you give up."
+      - "A teammate says 'UDP is just worse TCP'. Correct them using DNS and NTP as evidence."
+    labs:
+      - title: "UDP on loopback: chat, drops, and the sound of silence"
+        slug: netplus-udp-loopback-lab
+        difficulty: core
+        est_minutes: 25
+        scenario: |
+          Ticket: "Our StatsD collector loses metrics under load but nothing in the
+          logs shows errors." Before touching production you want to *see* every
+          UDP failure mode on your own machine: how datagrams flow, what happens
+          when the receiver dies, and how buffer-full drops stay invisible.
+        deliverable: |
+          1. Run a UDP chat over loopback: `nc -u -l 9999` in one terminal,
+             `nc -u 127.0.0.1 9999` in another. Type in both directions. In a third
+             terminal show the two sockets with `ss -u -anp` and note their states.
+          2. Kill the listener (Ctrl-C), then type two more lines in the client.
+             Record exactly when (and whether) the client notices, and explain why
+             the *first* line after the kill produces no error.
+          3. Contrast with TCP: repeat with `nc -l 9999` / `nc 127.0.0.1 9999`,
+             kill the listener, and note how the client reacts this time.
+          4. Demonstrate a buffer-full drop: run a listener that never reads —
+             `python3 -c "import socket,time; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.bind(('127.0.0.1',9999)); time.sleep(300)"` —
+             then blast it:
+             `python3 -c "import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); [s.sendto(b'x'*1200,('127.0.0.1',9999)) for _ in range(100000)]"`.
+             Show the Recv-Q pinned at its maximum in `ss -u -anp` and the drops
+             counter climbing in `/proc/net/udp` (or `nstat -az UdpRcvbufErrors`).
+          5. Write 3–4 sentences answering the ticket: where did the metrics go,
+             and which counter proves it?
+        hints: |
+          - `ss -u -anp` shows UNCONN for a bare bound socket; nc's client socket
+            shows ESTAB because nc calls connect() (which, for UDP, only pins the
+            peer address).
+          - After the listener dies, the client's first send triggers an ICMP port
+            unreachable *reply*; the error only surfaces on the *next* send.
+          - `/proc/net/udp` is hex; the last column is `drops`. Find your socket by
+            port: 9999 = 270F, so look for `:270F`.
+          - No `nc` on the box? `python3 -m socket` won't help, but openbsd-netcat
+            is in the Manjaro repos: `sudo pacman -S openbsd-netcat` (offline ISO
+            has it too).
+        solution: |
+          1. Both directions deliver instantly. `ss -u -anp` shows the listener as
+             UNCONN on `127.0.0.1:9999` and the client as ESTAB with a pinned peer
+             — connect() on UDP stores the address, no packets were exchanged.
+          2. First line after killing the listener: **no error** — the datagram is
+             sent, the kernel gets back ICMP port unreachable, and stores the error
+             on the socket. The **second** send fails: nc prints something like
+             `Ncat: Connection refused.` or just exits. If ICMP were filtered, the
+             client would type into the void forever — that's UDP's "silence".
+          3. TCP version: the moment the listener dies, the connection is torn
+             down (FIN); the client nc exits immediately. TCP *tells* you.
+          4. `ss -u -anp` shows the sleeping listener's Recv-Q pinned at its
+             buffer limit (e.g. `Recv-Q 212992`). `cat /proc/net/udp | grep 270F`
+             shows the final `drops` column at tens of thousands and climbing;
+             `nstat -az UdpRcvbufErrors` shows the same number globally.
+          5. Ticket answer: the collector reads slower than metrics arrive, the
+             socket receive buffer fills, and the kernel silently drops the excess
+             — UDP has no backpressure, so senders never slow down and log
+             nothing. `UdpRcvbufErrors` / the socket's `drops` counter is the
+             proof. Fixes: raise `net.core.rmem_max` + SO_RCVBUF, or read faster
+             (more collector threads).
+
+  - title: "TCP: handshake, sliding window & connection states"
+    slug: tcp-reliable-byte-stream
+    order: 3
+    est_minutes: 35
+    summary: "How TCP builds a reliable, ordered byte stream — SYN/SEQ/ACK mechanics, flow control, retransmission, and the state machine behind every `ss` output."
+    body: |
+      ## The promise: a reliable, ordered byte stream
+
+      TCP takes IP's unreliable packets and promises the application: *every byte
+      you write arrives, exactly once, in order* — or the connection dies telling
+      you so. Note what it does **not** promise: message boundaries. TCP is a
+      **byte stream**; three `write()`s can arrive as one `read()` or five. The
+      framing is your protocol's job (HTTP's `Content-Length`, for example — two
+      lessons from now).
+
+      ## The three-way handshake
+
+      Every byte in each direction is numbered. The handshake's real job is to
+      exchange each side's **Initial Sequence Number (ISN)** — the starting point
+      of its numbering — and to prove both directions work:
+
+      ```text
+      client                                     server
+        |                                          |
+        |  SYN, seq=1000                           |  "I want to talk; my bytes
+        |----------------------------------------->|   start counting at 1000."
+        |                                          |
+        |  SYN+ACK, seq=3000, ack=1001             |  "Heard you up to 1000; mine
+        |<-----------------------------------------|   start at 3000."
+        |                                          |
+        |  ACK, ack=3001                           |  "Heard you too. Talk."
+        |----------------------------------------->|
+        |              ESTABLISHED                 |
+      ```
+
+      - The **ack number is the next byte expected** — `ack=1001` means "I have
+        everything up to and including 1000."
+      - The SYN itself consumes one sequence number (that's why ack = seq+1 even
+        though no data moved).
+      - The ISN is **randomized** per connection — so segments from an old
+        connection on the same 4-tuple can't be mistaken for this one, and
+        off-path attackers can't guess valid sequence numbers.
+      - The SYN carries options, most importantly **MSS** (Maximum Segment Size):
+        each side announces the biggest chunk it can receive — typically 1460 on
+        Ethernet (1500 − 40 headers) and 65495 on loopback. Also window scaling
+        and SACK support — negotiable *only* here, at connection start.
+
+      Two-way wouldn't be enough: after SYN and SYN+ACK, the *server* still has no
+      proof the client can hear it. The third packet closes the loop — both sides
+      have now sent and had a sequence number acknowledged.
+
+      ## Sliding window: reliability *and* flow control from one mechanism
+
+      The sender may have at most a **window** of unacknowledged bytes in flight;
+      as ACKs arrive, the window slides forward. Every ACK also carries the
+      receiver's advertised window (**rwnd**): how much buffer space it has left.
+
+      - Receiver's app reads slowly → its receive buffer fills → it advertises a
+        smaller rwnd → the sender slows. That's **backpressure**, end to end:
+        a slow consumer physically slows the producer. (Compare UDP, which drops.)
+      - rwnd hits **zero** → sender stops entirely and sends periodic **window
+        probes** until space opens. A connection stuck this way shows a growing
+        Recv-Q on the receiver in `ss -tn` — the classic "server is fine, the
+        *client* stopped reading" incident.
+      - ACKs are **cumulative**: `ack=5001` acknowledges everything below it, so
+        a lost ACK is repaired for free by the next one.
+
+      ## Retransmission: how loss is noticed
+
+      1. **RTO (retransmission timeout)** — the sender keeps a smoothed RTT
+         estimate; no ACK within the timeout → resend, double the timeout, repeat.
+         Slow but always works.
+      2. **Fast retransmit** — a receiver getting out-of-order data re-ACKs the
+         last in-order byte. **Three duplicate ACKs** tell the sender "one segment
+         is missing but data after it is arriving" → retransmit immediately,
+         no timeout wait. (What this does to the *congestion* window: next lesson.)
+
+      ## Teardown and the state machine
+
+      Each direction closes independently with **FIN** ("no more data from me") —
+      you can half-close. The condensed map, with the states you'll actually see
+      in `ss -tan`:
+
+      ```text
+                       CLOSED
+              passive /       \ active open (connect)
+                LISTEN         SYN_SENT
+                   | recv SYN      | recv SYN+ACK, send ACK
+               SYN_RECV --------> ESTABLISHED
+                                       |
+              you close first          |          peer closes first
+        FIN_WAIT_1 → FIN_WAIT_2 → TIME_WAIT     CLOSE_WAIT → LAST_ACK → CLOSED
+                        (2MSL wait, then CLOSED)  ("app must call close()!")
+      ```
+
+      Two states page you at 3am:
+
+      - **TIME_WAIT** — the side that closed *first* holds the 4-tuple for
+        **2×MSL** (60 s on Linux) after the last FIN. Why: (1) if its final ACK
+        was lost, the peer retransmits the FIN and someone must still be there to
+        re-ACK it; (2) any stray delayed segments from this connection die out
+        before the 4-tuple can be reused — otherwise old bytes could corrupt a new
+        connection. Side effect you *will* hit: restart your server and `bind()`
+        fails with **"address already in use"** because the old socket still owns
+        the port. The fix is **`SO_REUSEADDR`** — "let me bind even though
+        TIME_WAIT sockets exist on this port" — which is why every serious server
+        sets it (and `python3 -m http.server` does).
+      - **CLOSE_WAIT** — the peer sent FIN; the kernel is waiting for *your app*
+        to call `close()`. Hundreds of CLOSE_WAIT sockets = your code leaks
+        connections (forgot to close a response, an exception skipped a cleanup).
+        The remote did nothing wrong.
+
+      **FIN vs RST:** FIN is the polite close — buffered data is delivered, the
+      state machine runs. **RST** aborts: sent when a segment arrives for a
+      connection that doesn't exist (nothing listening → `connection refused`), or
+      when a side wants out *now* (`connection reset by peer`). RST skips
+      TIME_WAIT entirely.
+
+      ```bash
+      # Your daily state census:
+      ss -tan | awk 'NR>1 {print $1}' | sort | uniq -c | sort -rn
+      ```
+
+      ## In practice — why you care as a DevOps engineer
+
+      - `ss -tan state close-wait` growing → *your* app leaks sockets; go read its
+        connection handling, not the network.
+      - High-churn clients (a proxy opening a connection per request) can exhaust
+        ephemeral ports on TIME_WAIT — the real fix is connection reuse, next
+        lesson.
+      - `connection refused` (RST) = machine reachable, nothing listening on that
+        port. `connection timed out` = packets never came back — filtered or
+        routed to nowhere. Different failures, different suspects.
+      - Load balancer "connection draining" is just: stop sending new connections,
+        let ESTABLISHED ones FIN naturally.
+    deep_dive: |
+      ### The kernel side of `listen()`: two queues, SYN cookies, and keepalives
+
+      **A listening socket owns two queues.** When a SYN arrives, the kernel
+      creates a mini-socket in the **SYN queue** (state SYN_RECV) and replies
+      SYN+ACK. When the final ACK arrives, the connection is moved to the **accept
+      queue**, where it waits — fully established — for the application to call
+      `accept()`. Two queues, two failure modes:
+
+      - **SYN queue overflow** — classically caused by a **SYN flood**: attackers
+        send SYNs from spoofed addresses and never ACK. Defense:
+        `net.ipv4.tcp_syncookies=1` (default on). When the queue is full, the
+        kernel stops storing state and instead *encodes* the connection essentials
+        (a hash of the 4-tuple + coarse timestamp + MSS class) into the ISN of the
+        SYN+ACK — a **SYN cookie**. A legitimate final ACK returns the value
+        (ack = ISN+1), the kernel validates the cookie and rebuilds the connection
+        from it. Statelessness as a defense.
+      - **Accept queue overflow** — your *app* is too slow at `accept()` (GC
+        pause, thread starvation). Its size is `min(backlog, net.core.somaxconn)`
+        — the `backlog` from `listen(fd, backlog)`, capped by the sysctl (4096 on
+        modern kernels, historically 128 — the source of many "why does my server
+        drop connections under load" mysteries). Overflow behaviour: the ACK is
+        ignored (client thinks it's connected; its first data hits silence and
+        retransmits) unless `net.ipv4.tcp_abort_on_overflow=1` sends an honest
+        RST. Watch it live:
+
+        ```bash
+        ss -ltn                       # on LISTEN sockets: Recv-Q = current accept-queue
+                                      # length, Send-Q = its max size
+        nstat -az TcpExtListenDrops   # cumulative overflow drops
+        ```
+
+      **TIME_WAIT accounting.** `ss -tan state time-wait` lists them;
+      `net.ipv4.tcp_max_tw_buckets` caps how many the kernel will hold (beyond
+      that, connections are reset instead — with a kernel log line).
+      `net.ipv4.tcp_tw_reuse=2` lets *outgoing* connections safely reuse a
+      TIME_WAIT 4-tuple after ~1 s using timestamps. The infamous `tcp_tw_recycle`
+      was so unsafe behind NAT it was deleted from the kernel in 4.12.
+
+      **Keepalives.** An idle TCP connection exchanges nothing — by default
+      forever. With `SO_KEEPALIVE`, after `net.ipv4.tcp_keepalive_time` (7200 s!)
+      of silence the kernel sends probes: 9 probes (`tcp_keepalive_probes`) every
+      75 s (`tcp_keepalive_intvl`); all unanswered → connection declared dead.
+      Two hours is far longer than most NAT/firewall idle timeouts (often 5–15
+      min), which is why long-idle connections through middleboxes die silently
+      and why databases, SSH (`ServerAliveInterval`), and gRPC all layer their own
+      faster keepalives on top.
+    cards:
+      - front: "Write out the three-way handshake with flags and the seq/ack arithmetic."
+        back: "1) SYN seq=x. 2) SYN+ACK seq=y, ack=x+1. 3) ACK ack=y+1. Each SYN consumes one sequence number; ack always names the next byte expected."
+      - front: "What does the ACK number in a TCP segment mean exactly?"
+        back: "The next byte the ACKer expects — i.e. it cumulatively acknowledges every byte below that number."
+      - front: "Why does TIME_WAIT exist, and how long does it last on Linux?"
+        back: "The first closer waits 2×MSL (60 s on Linux) so it can re-ACK a retransmitted final FIN, and so stray delayed segments die before the 4-tuple is reused."
+      - front: "Your restarted server fails with 'address already in use'. Cause and fix?"
+        back: "Old connections on that port sit in TIME_WAIT, blocking bind(). Fix: set SO_REUSEADDR on the listening socket before bind (standard practice for servers)."
+      - front: "You see 800 sockets in CLOSE_WAIT. Whose bug is it and why?"
+        back: "Yours. CLOSE_WAIT means the peer sent FIN and the kernel is waiting for your application to call close() — the app is leaking sockets."
+      - front: "What triggers a fast retransmit?"
+        back: "Three duplicate ACKs — the receiver keeps re-ACKing the last in-order byte, signalling one lost segment while later data still arrives."
+      - front: "FIN vs RST?"
+        back: "FIN: polite close, one direction, data delivered, full state machine (incl. TIME_WAIT). RST: abort — connection refused / reset by peer, no TIME_WAIT."
+      - cloze: "When the receiver advertises a window of {{c1::zero}}, the sender stops and sends periodic {{c2::window probes}} until buffer space opens."
+      - cloze: "A listening socket has a {{c1::SYN}} queue for half-open connections and an {{c2::accept}} queue for established ones; the latter is capped by the backlog and {{c3::net.core.somaxconn}}."
+    feynman:
+      - "Explain the three-way handshake to a junior, including why a two-way handshake cannot work."
+      - "An intern restarted the API server and got 'address already in use', waited a minute, and it worked. Explain what happened in the kernel during that minute."
+      - "Explain how TCP's sliding window makes a slow *reader* on one machine slow down a fast *writer* on another, with no application code involved."
+    labs:
+      - title: "Watch a full TCP conversation, packet by packet"
+        slug: netplus-tcp-handshake-lab
+        difficulty: core
+        est_minutes: 30
+        scenario: |
+          You've drawn the handshake ladder on paper; now catch a real one. Using
+          only loopback, capture and annotate every packet of a complete HTTP
+          fetch: handshake, data, teardown — then find the TIME_WAIT it left
+          behind.
+        deliverable: |
+          1. Terminal A: `python3 -m http.server 8000`.
+             Terminal B: `sudo tcpdump -ni lo port 8000`.
+             Terminal C: `curl -s http://127.0.0.1:8000/ >/dev/null`.
+          2. From the capture, list every packet in order and annotate each with:
+             direction, flags ([S] [S.] [.] [P.] [F.]), and what it accomplishes.
+          3. Verify the seq/ack arithmetic of the first three packets (use the
+             absolute numbers: add `-S` to tcpdump if you prefer raw ISNs).
+          4. From the SYN, note the MSS option on loopback and explain why it's so
+             much larger than 1460.
+          5. Identify who sent the first FIN, then prove which side holds
+             TIME_WAIT: `ss -tan state time-wait '( sport = :8000 )'`.
+          6. Bonus: `curl http://127.0.0.1:1/` — capture what comes back when
+             nothing listens, and name the flag.
+        hints: |
+          - tcpdump flag key: S=SYN, .=ACK, P=PSH, F=FIN, R=RST. `[S.]` = SYN+ACK.
+          - By default tcpdump prints *relative* seq/ack after the handshake —
+            that's why you'll see `ack 1` instead of huge numbers.
+          - python's http.server speaks HTTP/1.0 by default → the *server* closes
+            first after responding. TIME_WAIT belongs to the first closer.
+          - Nothing at all appears for step 6? Port 1 needs the RST *reply*:
+            capture with `sudo tcpdump -ni lo port 1`.
+        solution: |
+          Typical annotated capture (ports will differ):
+
+          ```text
+          127.0.0.1.52814 > 127.0.0.1.8000: Flags [S],  seq 1874527485, win 65495,
+              options [mss 65495,sackOK,TS ...,wscale 7]      ← client SYN: ISN + MSS offer
+          127.0.0.1.8000  > 127.0.0.1.52814: Flags [S.], seq 3145092021, ack 1874527486
+                                                             ← SYN+ACK: server ISN, acks client ISN+1
+          127.0.0.1.52814 > 127.0.0.1.8000: Flags [.],  ack 1 ← handshake done (relative acks from here)
+          127.0.0.1.52814 > 127.0.0.1.8000: Flags [P.], seq 1:79, ack 1, length 78
+                                                             ← the HTTP GET request
+          127.0.0.1.8000  > 127.0.0.1.52814: Flags [.],  ack 79            ← server ACKs request
+          127.0.0.1.8000  > 127.0.0.1.52814: Flags [P.], seq 1:222, length 221
+                                                             ← headers + directory listing body
+          127.0.0.1.8000  > 127.0.0.1.52814: Flags [F.], seq 222, ack 79   ← SERVER closes first (HTTP/1.0)
+          127.0.0.1.52814 > 127.0.0.1.8000: Flags [.],  ack 223            ← client ACKs the FIN
+          127.0.0.1.52814 > 127.0.0.1.8000: Flags [F.], seq 79, ack 223    ← client's own FIN
+          127.0.0.1.8000  > 127.0.0.1.52814: Flags [.],  ack 80            ← final ACK
+          ```
+
+          3. SYN seq=1874527485 → SYN+ACK ack=1874527486 = ISN+1 (the SYN consumed
+             one number); SYN+ACK seq=3145092021 → final ACK ack=3145092022. ✓
+          4. MSS 65495 ≈ loopback MTU 65536 − 40 bytes of headers. Loopback never
+             touches Ethernet, so it isn't bound by the 1500-byte MTU → 1460 limit.
+          5. The server sent the first FIN, so **the server side** (port 8000)
+             holds TIME_WAIT — confirmed by `ss` showing
+             `TIME-WAIT 0 0 127.0.0.1:8000 127.0.0.1:52814`. It survives ~60 s.
+             (http.server sets SO_REUSEADDR, so an immediate restart still binds.)
+          6. The reply is `Flags [R.]` — an RST+ACK. Nothing listens on port 1, so
+             the kernel aborts the attempt: that's what `Connection refused` looks
+             like on the wire.
+
+  - title: "Congestion control: slow start, AIMD & why transfers are slow"
+    slug: tcp-congestion-control
+    order: 4
+    est_minutes: 30
+    summary: "How TCP probes the network for capacity — slow start, AIMD, CUBIC and BBR — and why short connections and bufferbloat make things feel slow."
+    body: |
+      ## Two different problems, two different windows
+
+      Flow control (last lesson) protects the **receiver**: rwnd says "my buffer
+      has this much room." But the *network path* between you can also be
+      overwhelmed — routers queue packets and eventually drop them. Congestion
+      control protects the **network**, with a second window kept by the sender:
+      **cwnd** (congestion window). The rule that unifies them:
+
+      ```text
+      bytes in flight ≤ min(cwnd, rwnd)
+      ```
+
+      rwnd is *advertised* by the peer; cwnd is *inferred* by the sender, because
+      the network sends no window ads. TCP must **probe**: send more and more
+      until something signals "too much" — classically, **packet loss**.
+
+      ## Slow start: exponential probing
+
+      A new connection knows nothing about the path, so it starts small — on
+      Linux, **10 MSS** (~14 KB) — and grows cwnd by one MSS per ACK, which
+      **doubles cwnd every RTT**: 10, 20, 40, 80... "Slow" start is actually
+      exponential; the name is historical (it replaced "dump the whole window at
+      once", which congested the 1986 Internet to collapse).
+
+      Doubling continues until cwnd crosses **ssthresh** (slow-start threshold),
+      where TCP switches to **congestion avoidance**: cwnd += 1 MSS per RTT —
+      linear, cautious growth.
+
+      ## Loss as the signal: AIMD
+
+      - **3 duplicate ACKs** (mild signal — data still flowing): **fast
+        retransmit** the missing segment, set ssthresh = cwnd/2, resume from the
+        halved window (**fast recovery**). No slow start.
+      - **RTO timeout** (severe — *nothing* is coming back): ssthresh = cwnd/2,
+        cwnd = 1 MSS, back to slow start from scratch.
+
+      The steady-state shape is **AIMD** — additive increase, multiplicative
+      decrease — the famous sawtooth:
+
+      ```text
+      cwnd
+        ^          loss              loss
+        |           x                 x
+        |         / |               / |
+        |       /   |    +1/RTT   /   |            /
+        |     /     |___________/     |__________/
+        |   /       (halved)          (halved)
+        |  / slow start (doubling per RTT)
+        +---------------------------------------------→ time
+      ```
+
+      AIMD isn't arbitrary: halving on shared loss while everyone adds +1 provably
+      drives competing flows toward an equal share of the bottleneck.
+
+      ## Reno → CUBIC → BBR, honestly
+
+      **Reno** is the classic above: halve on loss, climb back linearly. On
+      today's fat, long pipes it's dismal — after one loss on a 10 Gb/s
+      transcontinental path, the linear climb back to full window takes *minutes*.
+
+      **CUBIC** (Linux default since 2.6.19, 2006) replaces the linear climb with
+      a cubic curve of *time since the last loss*: it regrows quickly, flattens
+      out deliberately near the window where loss last happened (respectful
+      plateau), then accelerates again if no loss appears. Much better on
+      high-bandwidth-delay paths, and RTT-fairer since growth depends on wall
+      time, not ACK rate. But it's still **loss-based**: it only backs off after
+      queues overflow, which means it habitually *fills every buffer on the path*.
+
+      **BBR** (Google, 2016) abandons loss as the signal. It continuously
+      estimates two numbers — the **bottleneck bandwidth** and the **minimum RTT**
+      — and paces packets to sit at their product (the BDP), i.e. maximum
+      throughput *just before* queues build. Loss is mostly ignored. Result:
+      near-full throughput on lossy paths where CUBIC collapses, and low queueing
+      delay. Honest caveat: BBRv1 could bully loss-based flows sharing a
+      bottleneck (its model doesn't hear their pain signal); v2/v3 moderate this.
+      It powers Google/YouTube traffic and is one sysctl away on Linux.
+
+      ## Bufferbloat: why loss arrives too late
+
+      Router vendors added huge buffers ("dropping is bad, right?"). A loss-based
+      sender keeps ramping until the buffer *overflows* — so a 1-second-deep
+      buffer means 1 second of queueing delay for **everyone** (your SSH
+      keystrokes included) before the sender ever hears "slow down." That's
+      **bufferbloat**: catastrophic latency with great throughput. Modern Linux
+      defaults mitigate it with the `fq_codel` qdisc (drop early, keep queues
+      short), and BBR sidesteps it by not needing the overflow at all.
+
+      ## Why your short connections never get fast
+
+      Slow start means **every new connection begins at ~14 KB per RTT**. A 100 KB
+      asset on a 50 ms RTT path over a *fresh* connection costs:
+
+      | Step | RTTs |
+      |------|------|
+      | TCP handshake | 1 |
+      | TLS 1.3 handshake | 1 |
+      | cwnd 10 → 20 → 40 → 80 segments (~100 KB done) | ~3 |
+
+      ≈ 5 RTTs = 250 ms — regardless of whether your bandwidth is 10 Mb/s or
+      10 Gb/s. Short transfers are **RTT-bound, not bandwidth-bound**. This single
+      fact explains a decade of protocol engineering:
+
+      - **HTTP keep-alive** and **connection pooling** (databases, upstreams):
+        reuse a connection whose cwnd is already grown — pools aren't just about
+        socket setup cost.
+      - **HTTP/2 multiplexing**: many requests share ONE warmed-up connection.
+      - **QUIC/HTTP/3**: merge transport+TLS handshakes into 1 RTT (0-RTT on
+        resumption) because those handshake RTTs dominate small fetches.
+
+      ## In practice — why you care as a DevOps engineer
+
+      - "The network is slow" tickets for small API calls are usually **RTT ×
+        handshake count**, not bandwidth. Count round trips before blaming pipes.
+      - Idle pooled connections may have their cwnd reset
+        (`net.ipv4.tcp_slow_start_after_idle=1`, the default) — a "warm" pool
+        that sat quiet for a few RTTs isn't as warm as you think.
+      - Switching a lossy-WAN service to BBR
+        (`sysctl -w net.ipv4.tcp_congestion_control=bbr`) is a legitimate,
+        reversible, per-machine experiment — measure before and after.
+    deep_dive: |
+      ### Reading `ss -ti` like an instrument panel
+
+      `ss -ti` dumps the kernel's live per-connection TCP state — the same struct
+      the congestion algorithm updates on every ACK. A real line from a loopback
+      transfer:
+
+      ```text
+      ESTAB 0 0 127.0.0.1:8000 127.0.0.1:52814
+           cubic wscale:7,7 rto:204 rtt:0.548/0.31 mss:32768 pmtu:65535
+           cwnd:41 ssthresh:28 bytes_sent:52428800 bytes_acked:52297729
+           segs_out:1620 segs_in:811 send 19.6Gbps lastsnd:4 lastrcv:4
+           pacing_rate 23.5Gbps delivery_rate 17.2Gbps unacked:4 retrans:0/12
+           rcv_space:65483 minrtt:0.012
+      ```
+
+      Field by field, the ones that answer real questions:
+
+      - **cubic** — the congestion algorithm governing this connection.
+      - **wscale:7,7** — window-scale shift negotiated in the SYN (each side
+        multiplies advertised windows by 2^7; without it rwnd caps at 64 KB).
+      - **rto:204** — current retransmission timeout, ms (min 200 on Linux).
+      - **rtt:0.548/0.31** — smoothed RTT / mean deviation, ms. The first number
+        drives the RTO; watch it climb when a path queues (bufferbloat, live).
+      - **cwnd:41** — congestion window **in MSS units**, not bytes:
+        41 × 32768 ≈ 1.3 MB may be in flight. On a fresh connection you'll see
+        cwnd:10.
+      - **ssthresh:28** — appears only after the first loss event; below it,
+        slow start; above it, congestion avoidance. Its very presence tells you
+        this connection has experienced loss.
+      - **unacked:4** — segments currently in flight awaiting ACK.
+      - **retrans:0/12** — retransmissions: current burst / lifetime total. The
+        lifetime counter is your loss evidence.
+      - **pacing_rate / delivery_rate** — what the kernel *wants* to send at vs
+        what the path *actually delivered* recently. BBR steers by these.
+      - With BBR active the line grows a
+        `bbr:(bw:9.4Gbps,mrtt:0.015,pacing_gain:2.885,cwnd_gain:2.885)` blob —
+        its live model: estimated bottleneck bandwidth, min RTT, and the current
+        probing gains (2.885 = startup phase).
+
+      Algorithm plumbing:
+
+      ```bash
+      sysctl net.ipv4.tcp_congestion_control            # current default (cubic)
+      sysctl net.ipv4.tcp_available_congestion_control  # loaded algorithms
+      sudo modprobe tcp_bbr                             # load BBR if absent
+      ip route change default via <gw> dev <if> congctl bbr   # per-route override
+      ```
+
+      Each algorithm is a kernel module implementing `struct tcp_congestion_ops`
+      — hooks like `cong_avoid` (an ACK arrived: grow cwnd) and `ssthresh` (loss:
+      pick the new threshold). `cubic`'s hooks implement the cubic curve; `bbr`'s
+      ignore the loss hook almost entirely. Per-socket override:
+      `setsockopt(TCP_CONGESTION)` — one nginx can serve CUBIC and BBR
+      simultaneously to different upstreams.
+    cards:
+      - front: "Flow control vs congestion control — what does each protect, and via which window?"
+        back: "Flow control protects the receiver via rwnd (advertised in every segment). Congestion control protects the network path via cwnd (inferred by the sender). In-flight data ≤ min(cwnd, rwnd)."
+      - front: "Describe slow start precisely: starting size and growth pattern on Linux."
+        back: "cwnd starts at 10 MSS and grows one MSS per ACK — i.e. doubles every RTT — until it crosses ssthresh (→ congestion avoidance, +1 MSS/RTT) or loss occurs."
+      - front: "How does TCP react to 3 duplicate ACKs vs an RTO timeout?"
+        back: "3 dup ACKs: fast retransmit, ssthresh = cwnd/2, continue from halved window (fast recovery). RTO: ssthresh = cwnd/2 but cwnd drops to 1 MSS and slow start begins again."
+      - front: "One honest sentence each: CUBIC and BBR."
+        back: "CUBIC (Linux default): loss-based, regrows cwnd along a cubic curve that plateaus near the last loss point — good on fat pipes but still fills buffers. BBR: ignores loss, paces traffic at estimated bottleneck-bandwidth × min-RTT — high throughput on lossy paths, low queueing, but v1 could starve loss-based flows."
+      - front: "What is bufferbloat?"
+        back: "Oversized router buffers delay the loss signal loss-based TCP relies on: senders ramp until the huge buffer overflows, so everyone's packets sit in a long queue — seconds of latency despite full throughput."
+      - front: "Why is a 100 KB fetch over a fresh HTTPS connection slow even on a 10 Gb/s link?"
+        back: "It's RTT-bound: ~1 RTT TCP handshake + 1 RTT TLS 1.3 + ~3 RTTs of slow start (10→20→40→80 MSS). Bandwidth barely matters; this is why keep-alive, pooling, HTTP/2 and QUIC exist."
+      - cloze: "The sender may have at most min({{c1::cwnd}}, {{c2::rwnd}}) bytes unacknowledged in flight."
+      - cloze: "In `ss -ti` output, {{c1::cwnd}} is measured in MSS units, and the {{c2::ssthresh}} field only appears after the connection has experienced its first loss event."
+      - cloze: "Check the kernel's congestion algorithm with `sysctl {{c1::net.ipv4.tcp_congestion_control}}` — the Linux default is {{c2::cubic}}."
+    feynman:
+      - "Explain the AIMD sawtooth to a junior: why increase additively but decrease multiplicatively, and how that leads competing flows toward fairness."
+      - "A product manager asks why the app's many small API calls stay slow after the bandwidth upgrade. Explain RTT-bound transfers, slow start, and what connection pooling actually fixes."
+    labs:
+      - title: "Watch cwnd live — then hurt it with packet loss"
+        slug: netplus-congestion-ss-lab
+        difficulty: challenge
+        est_minutes: 30
+        scenario: |
+          Incident review claims "retransmissions caused the slowdown" but nobody
+          on the team can *show* a congestion window reacting to loss. Build the
+          demo on loopback: observe a healthy transfer's cwnd, then inject real
+          packet loss with netem and watch the collapse in `ss -ti`.
+        deliverable: |
+          1. Prepare: `dd if=/dev/zero of=/tmp/big bs=1M count=500` and serve it:
+             `python3 -m http.server 8000` (from /tmp).
+          2. Start a rate-limited download so the connection lives long enough:
+             `curl -s --limit-rate 5M -o /dev/null http://127.0.0.1:8000/big`
+             and in another terminal watch it:
+             `watch -n 0.3 "ss -ti '( sport = :8000 )'"`.
+             Record: the algorithm name, cwnd, rtt, retrans, and whether ssthresh
+             appears.
+          3. Inject 5% loss on loopback:
+             `sudo tc qdisc add dev lo root netem loss 5% delay 5ms`
+             Re-run the download and record the same fields. You should see
+             retrans climbing, ssthresh present, cwnd sawtoothing far lower, and
+             rtt reflecting the added delay.
+          4. Cleanup (do not skip): `sudo tc qdisc del dev lo root`
+             and verify with `tc qdisc show dev lo`.
+          5. Write the incident-review paragraph: how does loss show up in `ss -ti`,
+             and what happened to throughput and why?
+          6. Bonus: `cat /proc/sys/net/ipv4/tcp_available_congestion_control`; if
+             bbr is available (`sudo modprobe tcp_bbr`), set it
+             (`sudo sysctl -w net.ipv4.tcp_congestion_control=bbr`), repeat step 3,
+             compare the cwnd behaviour under the same loss, then restore cubic.
+        hints: |
+          - No `ssthresh` in the healthy run's output means no loss has occurred —
+            expected on clean loopback.
+          - WARNING: while the netem qdisc is on `lo`, EVERYTHING on loopback
+            (local DNS caches, IDE language servers, this platform on :8000) sees
+            5% loss and +5 ms. Keep the window short; always run the cleanup.
+          - cwnd is in MSS units; loopback MSS is huge (~32–64 KB), so cwnd:10 is
+            already ~half a megabyte in flight.
+          - The `watch` quoting matters: the filter `( sport = :8000 )` must reach
+            ss as one argument.
+        solution: |
+          Healthy run (step 2) — typical line:
+
+          ```text
+          cubic wscale:7,7 rto:204 rtt:0.4/0.2 mss:32768 cwnd:41
+          bytes_acked:2.4G segs_out:81k retrans:0/0 delivery_rate 18Gbps minrtt:0.01
+          ```
+
+          No ssthresh (never lost anything), retrans 0/0, tiny rtt, cwnd parked
+          comfortably above what a 5 MB/s limited reader needs.
+
+          Lossy run (step 3):
+
+          ```text
+          cubic wscale:7,7 rto:212 rtt:5.8/1.9 mss:32768 cwnd:7 ssthresh:5
+          bytes_acked:310M segs_out:11k retrans:1/438 delivery_rate 96Mbps
+          ```
+
+          Reading it: rtt now ≈ the injected 5 ms; **retrans:1/438** = one segment
+          currently being retransmitted, 438 lifetime; **ssthresh:5** proves loss
+          events halved the window repeatedly; **cwnd sawtooths** in the 4–15
+          range instead of sitting at 41 — each 5%-lottery loss multiplicatively
+          decreases it, and the additive climb keeps getting cut short. Throughput
+          collapses (delivery_rate drops by orders of magnitude) because
+          in-flight data ≤ cwnd × MSS per RTT, and cwnd can no longer grow past a
+          handful of segments.
+
+          Cleanup verification: `tc qdisc show dev lo` reports the default
+          (`noqueue`) again — netem gone.
+
+          Bonus: under BBR the same 5% loss barely dents cwnd/delivery_rate — BBR
+          doesn't treat random loss as a congestion signal; its `bbr:(bw:...,
+          mrtt:...)` model keeps pacing near measured bandwidth. Restore with
+          `sudo sysctl -w net.ipv4.tcp_congestion_control=cubic`.
+
+  - title: "HTTP & HTTPS: what actually happens when you curl"
+    slug: http-https-mechanics
+    order: 5
+    est_minutes: 35
+    summary: "Requests and responses on the wire, status codes as triage signals, keep-alive to HTTP/3, and the TLS handshake as a sequence you can read."
+    body: |
+      ## HTTP/1.1 is text you can read
+
+      Strip away every framework and an HTTP request is a few lines of ASCII over
+      a TCP connection (which you now know how to build):
+
+      ```text
+      GET /health HTTP/1.1\r\n          ← request line: method, path, version
+      Host: api.example.com\r\n         ← headers: one per line
+      User-Agent: curl/8.5.0\r\n
+      Accept: */*\r\n
+      \r\n                              ← blank line: headers end (body would follow)
+      ```
+
+      The response mirrors it:
+
+      ```text
+      HTTP/1.1 200 OK\r\n               ← status line: version, code, reason
+      Content-Type: application/json\r\n
+      Content-Length: 15\r\n            ← how the client knows where the body ends
+      \r\n
+      {"status":"ok"}
+      ```
+
+      Because TCP is a byte stream with no message boundaries, HTTP must frame
+      itself: **`Content-Length`** (exact byte count) or **`Transfer-Encoding:
+      chunked`** (stream of length-prefixed chunks, ended by a zero chunk — used
+      when the server doesn't know the size upfront). A response with neither ends
+      only when the connection closes.
+
+      ## Status classes as an ops-triage table
+
+      The class tells you *where to look*; a few specific codes tell you *which
+      hop* failed:
+
+      | Code | Meaning | Where the problem is |
+      |------|---------|----------------------|
+      | 2xx | success | nowhere — move on |
+      | 301/302/304 | redirects / not-modified | usually fine; loops = config |
+      | 400 | malformed request | the client |
+      | 401 / 403 | unauthenticated / unauthorized | credentials vs permissions |
+      | 404 | no such resource | client path or deploy missing files |
+      | 429 | rate limited | client volume (or your limits) |
+      | 500 | app threw an exception | the backend code — go read its logs |
+      | **502 Bad Gateway** | proxy reached upstream but got garbage: connection refused, RST, malformed response | **upstream is down/crashing** — restarting, OOM-killed, wrong port |
+      | **503 Service Unavailable** | the proxy/app itself refuses: no healthy upstreams, overload, maintenance | **this hop** (or its whole pool) |
+      | **504 Gateway Timeout** | proxy reached upstream, upstream never answered in time | **upstream is hung/slow** — deadlock, slow query, undersized pool |
+
+      502 vs 504 is the money distinction in any proxied stack (nginx → app,
+      LB → service, ingress → pod): **502 = upstream failed fast, 504 = upstream
+      failed slow.** Different pathologies, different dashboards. (nginx's
+      non-standard 499 = the *client* gave up waiting — check your timeout chain.)
+
+      ## The headers that matter in ops
+
+      | Header | Why you care |
+      |--------|--------------|
+      | `Host` | Required in 1.1. One IP serves many sites; this picks the virtual host. Wrong/missing Host = mystery 404s from the default vhost |
+      | `Connection` | `keep-alive` vs `close` — who hangs up after the response |
+      | `Content-Length` / chunked | The framing (above). Mismatch = truncation or hangs |
+      | `X-Forwarded-For` | Real client IP once a proxy is in the path — otherwise every request "comes from" the LB. Trust it only from your own proxies; clients can forge it |
+      | `Location` | Where 3xx points. Redirect loops live here |
+      | `Retry-After` | Well-behaved 429/503s tell clients when to come back |
+
+      ## One connection, many requests: 1.1 → 2 → 3
+
+      - **Keep-alive (HTTP/1.1 default):** reuse the TCP connection for the next
+        request — skip handshake and slow start (last lesson's whole argument).
+        But requests still go one-at-a-time per connection.
+      - **Pipelining** (1.1's failed idea): send several requests without waiting;
+        responses must return in order, so one slow response blocks the rest
+        (head-of-line blocking). Effectively abandoned; browsers opened 6 parallel
+        connections per host instead.
+      - **HTTP/2:** one TCP connection carries many concurrent **streams** —
+        binary frames, interleaved, plus header compression. Kills app-level HoL
+        blocking… except one lost TCP *segment* still stalls every stream, because
+        TCP delivers bytes strictly in order (transport-level HoL).
+      - **HTTP/3:** same semantics over **QUIC on UDP 443** — each stream
+        recovers loss independently, and the transport+TLS handshake merges into
+        1 RTT (0 on resumption). The UDP lesson's "QUIC as a framework" arc,
+        completed.
+
+      ## The TLS handshake, as wire mechanics
+
+      HTTPS = HTTP inside a TLS session on port 443. Before any request can be
+      sent, a handshake (TLS 1.3: **one round trip**; 1.2: two) sets up the
+      channel:
+
+      ```text
+      client                                        server
+        |-- ClientHello ----------------------------->|  TLS versions, cipher suites,
+        |     + SNI: "api.example.com"                |  key share, SNI, ALPN list
+        |     + ALPN: [h2, http/1.1]                  |
+        |<-- ServerHello + certificate chain ---------|  chosen cipher, key share,
+        |     + ALPN: h2            [encrypted from here]  cert: leaf + intermediates
+        |                                             |
+        |   client validates the chain:               |
+        |     leaf → intermediate → trusted root,     |
+        |     hostname matches, dates valid           |
+        |-- Finished -------------------------------->|
+        |========= application data (HTTP) ==========>|
+      ```
+
+      The parts an engineer touches weekly:
+
+      - **SNI** (Server Name Indication): the hostname, sent **in cleartext** in
+        the ClientHello — it's how one IP serves many HTTPS sites (the TLS-layer
+        twin of the Host header: the server must pick a certificate *before*
+        encryption starts). Also how firewalls filter HTTPS by hostname.
+      - **Certificate chain validation:** the server sends its **leaf** cert plus
+        intermediates; the client walks leaf → intermediate → a **root** already
+        in its local trust store, checking signatures, validity dates, and that
+        the name matches what it asked for. A missing intermediate is the classic
+        "works in Chrome (it caches intermediates), fails in curl" bug.
+      - **ALPN:** the client lists application protocols inside the ClientHello;
+        the server's choice (`h2`?) arrives with the ServerHello — HTTP/2 gets
+        negotiated for free, zero extra round trips.
+      - **Session resumption:** the server hands the client a ticket; next
+        connection presents it and skips certificate exchange (and with 0-RTT can
+        send data immediately). Why the *second* page load is snappier.
+
+      Mechanics only, deliberately: what makes these primitives *secure* — the
+      key exchange math, cipher choices, PKI trust design — is chapter 7's turf.
+
+      ## curl's built-in stopwatch
+
+      `curl -w` exposes per-phase timers that map exactly onto everything above:
+
+      ```bash
+      curl -so /dev/null -w 'dns   %{time_namelookup}\ntcp   %{time_connect}\ntls   %{time_appconnect}\nttfb  %{time_starttransfer}\ntotal %{time_total}\n' https://example.com/
+      ```
+
+      Each value is cumulative since start, so the *gaps* assign blame:
+      dns→tcp = TCP handshake (network RTT), tcp→tls = TLS handshake,
+      tls→ttfb ≈ **server think time**. Memorise this one-liner; it's a complete
+      first-response triage kit.
+
+      ## In practice — why you care as a DevOps engineer
+
+      - Reading `curl -v` fluently is the difference between "it's broken" and
+        "TCP connects but TLS fails on name mismatch — cert doesn't cover this
+        subdomain."
+      - 502 spike = upstreams dying (deploys? OOM?); 504 spike = upstreams
+        drowning (slow queries? pool exhaustion?). Say which in the incident
+        channel and you've halved the search space.
+      - Every proxy/LB/ingress you'll configure is really: terminate TLS (SNI →
+        cert), route (Host header), append X-Forwarded-For, enforce timeouts
+        (that's your 504 threshold), pool upstream connections (keep-alive).
+    deep_dive: |
+      ### Reading the raw stream: curl -v symbols, chunked framing, and the keylog trick
+
+      **`curl -v` notation:** `*` = transport/TLS narration (connect, handshake,
+      cert verify, connection reuse), `>` = bytes curl sent, `<` = bytes received.
+      The `*` lines are where TLS failures explain themselves — "unable to get
+      local issuer certificate" (broken chain / missing intermediate),
+      "hostname ... does not match" (wrong cert), "connection refused" (RST from
+      the TCP layer — nothing even listening).
+
+      **Chunked framing, byte for byte.** Each chunk = hex length, CRLF, payload,
+      CRLF; a `0` chunk terminates:
+
+      ```text
+      HTTP/1.1 200 OK\r\n
+      Transfer-Encoding: chunked\r\n
+      \r\n
+      4\r\nWiki\r\n
+      5\r\npedia\r\n
+      0\r\n\r\n
+      ```
+
+      Framing is also a security boundary: if a front proxy and a backend disagree
+      about where a request ends (e.g. conflicting `Content-Length` and
+      `Transfer-Encoding`), an attacker can smuggle a second, hidden request
+      inside the first — **request smuggling**. That's why modern servers reject
+      ambiguous framing outright, and why HTTP/2's binary length-prefixed frames
+      removed the ambiguity by design.
+
+      **TLS = record layer + handshake protocol.** Every TLS byte on the wire
+      rides in a **record**: `type (1) | version (2) | length (2) | payload`.
+      Type 22 = handshake, 23 = application data, 21 = alert. In TLS 1.3 the
+      certificate is already encrypted, so a passive observer sees only:
+      ClientHello (with SNI/ALPN in the clear), ServerHello, then opaque records.
+      Encrypted ClientHello (ECH) aims to hide even SNI, moving it inside an
+      encrypted extension keyed via DNS — chapter 7 territory, but know the name.
+
+      **Inspecting the handshake without wireshark:**
+
+      ```bash
+      openssl s_client -connect 127.0.0.1:4443 -servername localhost </dev/null
+      ```
+
+      reads top to bottom as: the certificate chain (`s:` subject / `i:` issuer
+      per link — follow issuers upward to the root), the leaf PEM, then
+      `SSL-Session:` with `Protocol: TLSv1.3`, the cipher, the resumption ticket,
+      and the punchline `Verify return code:` — `0 (ok)` or an exact failure
+      like `18 (self-signed certificate)` / `10 (certificate has expired)`.
+      Add `-alpn h2,http/1.1` and look for `ALPN protocol: h2` to test protocol
+      negotiation.
+
+      **Decrypting your own captures:** browsers and curl honour
+      `SSLKEYLOGFILE=/tmp/keys.log` — they append per-session secrets there, and
+      wireshark can use that file to decrypt the TLS in a capture of *your own*
+      traffic. The passive tap itself stays blind; you're exporting the endpoint's
+      keys. (Capture methodology overall belongs to chapter 8.)
+    cards:
+      - front: "502 vs 504 from a proxy — what does each say about the upstream?"
+        back: "502 Bad Gateway: upstream failed *fast* — refused, RST, garbage response (it's down/crashing). 504 Gateway Timeout: upstream failed *slow* — reachable but never answered within the timeout (hung/overloaded)."
+      - front: "How does an HTTP/1.1 receiver know where the response body ends? (two mechanisms + the fallback)"
+        back: "Content-Length (exact byte count) or Transfer-Encoding: chunked (hex-length-prefixed chunks, terminated by a 0 chunk). With neither: read until the connection closes."
+      - front: "What is SNI, where does it travel, and why must it exist?"
+        back: "Server Name Indication — the target hostname inside the ClientHello, in cleartext, because the server must choose which certificate to present *before* encryption is established. It's what lets one IP host many HTTPS sites."
+      - front: "What does ALPN do and what does it cost?"
+        back: "Negotiates the application protocol (h2 vs http/1.1) inside the TLS handshake — the client offers a list in ClientHello, the server picks in ServerHello. Zero extra round trips."
+      - front: "Why should you only trust X-Forwarded-For when it was set by your own proxy?"
+        back: "It's just a header — any client can send a forged one. Only the value appended by infrastructure you control reflects the real peer IP."
+      - front: "In `curl -w` output, which gap approximates backend think-time (TTFB)?"
+        back: "time_starttransfer − time_appconnect: everything after TLS is up until the first response byte. (namelookup→connect = TCP handshake; connect→appconnect = TLS handshake.)"
+      - front: "Why does HTTP/2 still suffer head-of-line blocking, and how does HTTP/3 fix it?"
+        back: "HTTP/2 multiplexes streams over ONE TCP connection, and TCP delivers bytes strictly in order — one lost segment stalls all streams. HTTP/3 runs streams over QUIC (UDP), where each stream recovers loss independently."
+      - cloze: "TLS 1.3 completes its handshake in {{c1::1}} round trip (TLS 1.2 needed {{c2::2}}), and session resumption can cut it to {{c3::0}}-RTT."
+      - cloze: "Certificate validation walks {{c1::leaf}} → {{c2::intermediate}} → a {{c3::root}} in the local trust store, checking signatures, dates, and hostname."
+    feynman:
+      - "Narrate everything that happens on the wire for `curl https://api.example.com/health` — TCP handshake, TLS handshake (SNI, chain validation, ALPN), request, response — as if walking a junior through a packet capture."
+      - "The on-call channel reports 'LB returning 504s'. Explain to a junior what a 504 proves, what it rules out, and your first three checks."
+    labs:
+      - title: "Dissect curl end to end — then run your own TLS server"
+        slug: netplus-curl-tls-lab
+        difficulty: core
+        est_minutes: 35
+        scenario: |
+          Two exercises, fully offline. First: take one plain-HTTP curl apart into
+          its phases with -v and -w. Second: stand up a real TLS server with a
+          self-signed certificate, watch curl reject it, inspect the handshake
+          with openssl s_client, then make validation *succeed* by supplying the
+          right trust anchor — the whole certificate story on loopback.
+        deliverable: |
+          1. Serve: `python3 -m http.server 8000`. Run
+             `curl -v http://127.0.0.1:8000/ -o /dev/null` and, from the output,
+             label the phases: connect narration (`*`), request bytes (`>`),
+             response bytes (`<`). Which HTTP version does the server answer with,
+             which framing header does the response use, and who closes?
+          2. Time it:
+             `curl -so /dev/null -w 'dns %{time_namelookup}\ntcp %{time_connect}\nttfb %{time_starttransfer}\ntotal %{time_total}\n' http://127.0.0.1:8000/`
+             Explain why dns≈0 here and what each gap would mean against a remote
+             host.
+          3. Mint a cert and start a TLS server:
+             ```bash
+             openssl req -x509 -newkey rsa:2048 -keyout /tmp/key.pem \
+               -out /tmp/cert.pem -days 1 -nodes -subj '/CN=localhost'
+             openssl s_server -key /tmp/key.pem -cert /tmp/cert.pem -accept 4443 -www
+             ```
+          4. `curl -v https://localhost:4443/ -o /dev/null` — record the exact
+             error. Then rerun with `-k`. What did `-k` skip, and why is it an
+             emergency-only flag?
+          5. Inspect the handshake:
+             `openssl s_client -connect 127.0.0.1:4443 -servername localhost </dev/null | head -40`
+             Identify: the chain (s:/i: lines), the negotiated protocol+cipher,
+             and the Verify return code — and explain that code.
+          6. Make validation *pass* honestly:
+             `curl -v --cacert /tmp/cert.pem https://localhost:4443/ -o /dev/null`
+             Explain why this succeeds while step 4 failed.
+          7. Cleanup: stop s_server; `rm /tmp/key.pem /tmp/cert.pem`.
+        hints: |
+          - python http.server answers `HTTP/1.0` with `Content-Length` and closes
+            the connection (no keep-alive) — tie that back to the TCP lab's FIN.
+          - A self-signed cert is its own issuer: the s: and i: lines are
+            identical, and the chain has exactly one link.
+          - `--cacert` says "for this command, THIS is the trust store" — you are
+            declaring the self-signed cert a trusted root.
+          - s_client hangs waiting for input by design; `</dev/null` makes it
+            exit after the handshake.
+        solution: |
+          1. `*   Trying 127.0.0.1:8000...` / `* Connected` = TCP handshake done.
+             `> GET / HTTP/1.1`, `> Host: 127.0.0.1:8000`, `> Accept: */*` = the
+             literal request bytes. `< HTTP/1.0 200 OK`, `< Content-Type:
+             text/html`, `< Content-Length: 913` = the response: **HTTP/1.0**,
+             framed by **Content-Length**, and 1.0 without keep-alive means the
+             **server closes** after the body (the FIN you captured in the TCP
+             lab).
+          2. Sample: `dns 0.000012 / tcp 0.000210 / ttfb 0.002900 / total 0.003100`.
+             dns≈0: "127.0.0.1" is an address, nothing to resolve. Remotely:
+             dns→tcp gap = one network RTT (TCP handshake), tcp→ttfb = request
+             upload + server think time; against HTTPS add time_appconnect for
+             the TLS RTT(s).
+          4. curl fails hard: `SSL certificate problem: self-signed certificate`
+             — the chain ends at a root that is not in the system trust store, so
+             validation (chain → trusted root) cannot complete. `-k` skips chain
+             AND hostname verification entirely: the channel is still encrypted,
+             but you no longer know *who* is on the other end — fine for a
+             localhost experiment, negligent against production.
+          5. Chain shows one link with identical subject and issuer:
+             `s: CN=localhost` / `i: CN=localhost` (self-signed = self-issued).
+             Session block: `Protocol: TLSv1.3, Cipher: TLS_AES_256_GCM_SHA384`.
+             `Verify return code: 18 (self-signed certificate)` — openssl
+             completed the handshake but flags that the chain terminates in an
+             untrusted, self-issued root.
+          6. `--cacert /tmp/cert.pem` adds the cert to the trust store *for this
+             invocation*; the chain now ends at a trusted anchor, hostname
+             `localhost` matches CN=localhost, dates are valid → `SSL certificate
+             verify ok` and a 200. Same server, same cert — the only thing that
+             changed is *trust*, which is exactly the piece `-k` throws away.
+
 quiz:
   title: "Protocols & Ports — chapter exam"
   slug: netplus-ports-exam
   scope: chapter
-  description: "Well-known ports and the protocols behind them."
+  description: "Well-known ports, UDP and TCP mechanics, congestion control, and HTTP/TLS on the wire."
   questions:
     - type: fill_in
       text: "HTTPS uses TCP port ____."
@@ -151,6 +1223,82 @@ quiz:
     - type: true_false
       text: "DHCP uses UDP ports 67 and 68."
       explanation: "True — 67 server, 68 client, both UDP."
+      choices:
+        - {text: "True", correct: true}
+        - {text: "False"}
+    - type: mcq
+      text: "Which four fields make up the entire 8-byte UDP header?"
+      explanation: "Source port, destination port, length, checksum — four 16-bit fields. No seq numbers, no ACKs, no windows."
+      choices:
+        - {text: "Source port, destination port, length, checksum", correct: true}
+        - {text: "Source port, destination port, sequence number, ACK number"}
+        - {text: "Destination port, TTL, length, checksum"}
+        - {text: "Source port, destination port, window size, flags"}
+    - type: mcq
+      text: "A UDP datagram arrives for a socket whose receive buffer is full. What does the kernel do?"
+      explanation: "UDP has no backpressure: the datagram is silently dropped and only a counter (UdpRcvbufErrors / the drops column in /proc/net/udp) records it. The sender is never notified."
+      choices:
+        - {text: "Silently drops it and increments a drop counter", correct: true}
+        - {text: "Sends a smaller advertised window to slow the sender"}
+        - {text: "Queues it in swap until the app reads"}
+        - {text: "Returns an error to the sending application"}
+    - type: mcq
+      text: "Put the three-way handshake in order."
+      explanation: "SYN (client ISN) → SYN+ACK (server ISN, acks client ISN+1) → ACK. Both directions are now proven."
+      choices:
+        - {text: "SYN → SYN+ACK → ACK", correct: true}
+        - {text: "SYN → ACK → SYN+ACK"}
+        - {text: "ACK → SYN → SYN+ACK"}
+        - {text: "SYN → SYN → ACK"}
+    - type: mcq
+      text: "Why does the side that closes a TCP connection first enter TIME_WAIT for 2×MSL?"
+      explanation: "It must remain to re-ACK a retransmitted final FIN, and the wait lets stray delayed segments die before the 4-tuple can be reused by a new connection."
+      choices:
+        - {text: "To re-ACK a possibly retransmitted FIN and let old segments expire before 4-tuple reuse", correct: true}
+        - {text: "To give the application time to flush its logs"}
+        - {text: "To keep the congestion window warm for the next connection"}
+        - {text: "Because the peer must approve the close"}
+    - type: true_false
+      text: "A large pile-up of sockets in CLOSE_WAIT indicates a problem on the remote peer's side."
+      explanation: "False — CLOSE_WAIT means the peer already sent FIN and the kernel is waiting for YOUR application to call close(). It's a local socket leak."
+      choices:
+        - {text: "True"}
+        - {text: "False", correct: true}
+    - type: mcq
+      text: "A TCP sender receives three duplicate ACKs. What happens?"
+      explanation: "Fast retransmit: the missing segment is resent immediately, ssthresh = cwnd/2, and transmission continues from the halved window (fast recovery) — no timeout, no return to slow start."
+      choices:
+        - {text: "Fast retransmit of the missing segment and the congestion window is halved", correct: true}
+        - {text: "cwnd resets to 1 MSS and slow start restarts"}
+        - {text: "The connection is reset with RST"}
+        - {text: "Nothing until the retransmission timer expires"}
+    - type: command
+      text: "Show which TCP congestion-control algorithm this Linux machine uses by default."
+      explanation: "The sysctl net.ipv4.tcp_congestion_control holds the default (cubic on stock Linux); reading the /proc file is equivalent."
+      answers: ["sysctl net.ipv4.tcp_congestion_control", "cat /proc/sys/net/ipv4/tcp_congestion_control", "sysctl -n net.ipv4.tcp_congestion_control"]
+    - type: fill_in
+      text: "A TCP sender may keep at most min(cwnd, ____) bytes in flight."
+      explanation: "rwnd — the receiver's advertised window. cwnd protects the network; rwnd protects the receiver."
+      answers: ["rwnd", "receive window", "the receive window", "receiver window", "advertised window"]
+    - type: mcq
+      text: "Your load balancer starts returning 504s for one service. What does that tell you?"
+      explanation: "504 Gateway Timeout: the LB reached the upstream but it didn't respond within the timeout — the backend is hung or too slow. (502 would mean it failed fast: refused/RST/garbage.)"
+      choices:
+        - {text: "The upstream was reachable but didn't answer in time — it's hung or overloaded", correct: true}
+        - {text: "The upstream actively refused the connection"}
+        - {text: "The client sent a malformed request"}
+        - {text: "The LB itself has no healthy configuration"}
+    - type: mcq
+      text: "Where does SNI travel, and what property does that have?"
+      explanation: "SNI rides in the ClientHello, in cleartext — the server needs it to pick a certificate before encryption exists. It's also why on-path devices can see (and filter by) the hostname."
+      choices:
+        - {text: "In the ClientHello, unencrypted", correct: true}
+        - {text: "In the ServerHello, encrypted"}
+        - {text: "In the HTTP Host header, after the handshake"}
+        - {text: "In the TCP SYN options"}
+    - type: true_false
+      text: "HTTP/3 runs over UDP."
+      explanation: "True — HTTP/3 uses QUIC, which runs over UDP (port 443) and reimplements reliability, ordering, and TLS in userspace, with per-stream loss recovery."
       choices:
         - {text: "True", correct: true}
         - {text: "False"}
