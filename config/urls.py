@@ -9,4 +9,5 @@ urlpatterns = [
     path("review/", include("recall.urls")),
     path("exams/", include("exams.urls")),
     path("labs/", include("labs.urls")),
+    path("roadmap/", include("roadmap.urls")),
 ]

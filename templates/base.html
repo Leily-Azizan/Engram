@@ -16,6 +16,7 @@
     <nav class="nav">
       <a href="{% url 'dashboard' %}" class="{% if request.resolver_match.url_name == 'dashboard' %}active{% endif %}"><span class="ico">🏠</span> Dashboard</a>
       <a href="{% url 'session' %}" class="{% if request.resolver_match.url_name == 'session' %}active{% endif %}"><span class="ico">🎯</span> Today's session</a>
+      <a href="{% url 'roadmap' %}" class="{% if request.resolver_match.url_name == 'roadmap' %}active{% endif %}"><span class="ico">🗺️</span> Roadmap</a>
       <a href="{% url 'review' %}" class="{% if request.resolver_match.app_name == 'recall' or request.resolver_match.url_name == 'review' %}active{% endif %}"><span class="ico">🔁</span> Review</a>
       <a href="{% url 'feynman' %}" class="{% if request.resolver_match.url_name == 'feynman' %}active{% endif %}"><span class="ico">🗣️</span> Explain (Feynman)</a>
       <a href="{% url 'quiz_list' %}" class="{% if 'quiz' in request.resolver_match.url_name or 'attempt' in request.resolver_match.url_name %}active{% endif %}"><span class="ico">📝</span> Exams</a>

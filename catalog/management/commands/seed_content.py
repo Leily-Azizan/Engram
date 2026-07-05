@@ -15,6 +15,7 @@ from pathlib import Path
 
 import yaml
 from django.conf import settings
+from django.core.management import call_command
 from django.core.management.base import BaseCommand, CommandError
 
 from catalog.models import Chapter, Course, Lesson
@@ -48,6 +49,10 @@ class Command(BaseCommand):
             if only and course_dir.name != only:
                 continue
             self._load_course(course_dir)
+
+        # The DevOps roadmap lives alongside the courses; keep it in sync too.
+        if only is None and (base / "roadmap.yaml").exists():
+            call_command("seed_roadmap", verbosity=options.get("verbosity", 1))
 
         self.stdout.write(self.style.SUCCESS("Done."))
 

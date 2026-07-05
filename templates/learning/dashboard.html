@@ -12,6 +12,24 @@
   <div class="card stat"><div class="num good">{{ labs_done }}</div><div class="lbl">labs done</div></div>
 </div>
 
+{% if roadmap.total %}
+<div class="card">
+  <div class="roadmap-header-row">
+    <div>
+      <h3 style="margin-bottom:2px;">🗺️ DevOps roadmap</h3>
+      {% if roadmap.current %}
+        <span class="muted" style="font-size:14px;">📍 You are here:
+          <a href="{% url 'roadmap' %}#stage-{{ roadmap.current.stage.slug }}"><strong>Stage {{ roadmap.current.stage.order }} — {{ roadmap.current.stage.title }}</strong></a></span>
+      {% else %}
+        <span class="muted" style="font-size:14px;">🎓 All stages complete!</span>
+      {% endif %}
+    </div>
+    <div class="roadmap-count"><strong>{{ roadmap.done }}</strong>/{{ roadmap.total }} stages · <a href="{% url 'roadmap' %}">view the road</a></div>
+  </div>
+  <div class="bar good" style="margin-top:10px;"><span style="width:{{ roadmap.pct }}%"></span></div>
+</div>
+{% endif %}
+
 <div class="grid cols-2">
   <div class="card">
     <h3>🎯 Start studying</h3>

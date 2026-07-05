@@ -1,0 +1,267 @@
+# The DevOps roadmap — zero to hero.
+# Loaded by `python manage.py seed_roadmap` (seed_content runs it automatically).
+# Stages upsert by slug; `courses:` lists platform course slugs whose lesson
+# progress is shown on the stage card.
+
+stages:
+  - slug: foundations
+    title: "How computers & the internet work"
+    icon: "🧠"
+    tagline: "The mental model everything else hangs on — no cert, just understanding."
+    est_weeks: 2
+    learn: |
+      - What an **operating system** actually does: processes, memory, files, drivers.
+      - What happens when you type a URL: DNS → TCP → TLS → HTTP → render.
+      - Client/server model, what an IP address and a port are (roughly, for now).
+      - Text editors and the terminal: get comfortable living in a shell.
+      - How software gets from source code to a running program (compile vs interpret).
+    build: |
+      - Set up your own machine deliberately: partition, install Linux, dotfiles in a repo.
+      - Trace a real request: `ping`, `traceroute`, then `curl -v https://example.com`
+        and annotate every line of the output in your own words.
+      - Write a one-page "what happens when I hit Enter on a URL" doc from memory.
+    done_when: |
+      - You can explain processes, files, and the request path to a non-engineer.
+      - The terminal feels like home, not a scary black box.
+
+  - slug: linux
+    title: "Linux administration"
+    icon: "🐧"
+    tagline: "The operating system of servers. Deep fluency here pays off forever."
+    est_weeks: 8
+    courses: [lpic-1]
+    learn: |
+      - Boot process, systemd, runlevels/targets; package management (apt/dnf/pacman).
+      - The filesystem: FHS, permissions, links, mounts, LVM, RAID, fsck.
+      - Process management, signals, job control; users, groups, sudo.
+      - Text-fu: `grep`, `sed`, `awk`, pipes, redirection — the Unix way.
+      - Services, logging (journald), cron/systemd timers, and basic hardening.
+    build: |
+      - Do every **LPIC-1 lab** on this platform — they're the core of this stage.
+      - Run a home server or VM 24/7: create users, schedule backups with a systemd
+        timer, break the boot process on purpose and recover it.
+      - Keep a personal "runbook" repo of every incident you cause and fix.
+    done_when: |
+      - You can take a fresh VM to a hardened, monitored, backed-up server from memory.
+      - You'd sit the LPIC-1 exams without fear.
+
+  - slug: scripting
+    title: "Scripting & programming"
+    icon: "🐍"
+    tagline: "Bash for glue, Python for everything bigger. Automation is the job."
+    est_weeks: 6
+    learn: |
+      - Bash scripting properly: quoting, exit codes, `set -euo pipefail`, traps,
+        functions — the LPIC-1 *Shells & Scripting* chapter covers this.
+      - Python fundamentals: data structures, functions, files, `argparse`,
+        `subprocess`, `requests`, virtualenvs.
+      - Reading other people's code; writing code that a tired 3am-you can read.
+    build: |
+      - Automate three things you actually do by hand (log cleanup, backup rotation,
+        bulk rename, health checks) — one in Bash, the rest in Python.
+      - Write a CLI tool with flags and `--help` that your future self will thank you for.
+      - Rewrite one of your Bash scripts in Python and compare where each shines.
+    done_when: |
+      - When you do a task twice, your reflex is to script it the second time.
+      - You can parse a log file, hit an API, and send a report without googling the basics.
+
+  - slug: networking
+    title: "Networking fundamentals"
+    icon: "🌐"
+    tagline: "Every outage smells like DNS. Know the layers cold."
+    est_weeks: 6
+    courses: [network-plus]
+    learn: |
+      - OSI & TCP/IP models — not to recite, but to *localize failures by layer*.
+      - IP addressing and subnetting until CIDR math is automatic.
+      - TCP vs UDP, the common protocols and ports, NAT, routing and switching.
+      - DNS, DHCP, NTP — the services everything else silently depends on.
+      - Firewalls, VPNs/tunnels, TLS — how traffic is filtered and protected.
+    build: |
+      - Do the **Network+ labs** here, then subnet your own home/VM network for real.
+      - Capture your own traffic with `tcpdump`/Wireshark: find the DNS query, the
+        TCP handshake, and the TLS hello for one page load.
+      - Set up a WireGuard tunnel between two machines and route traffic through it.
+    done_when: |
+      - Given "the site is down", you can bisect by layer with `ping`, `dig`, `ss`,
+        `curl`, and `traceroute` — in the right order, explaining why.
+
+  - slug: git
+    title: "Git & collaboration"
+    icon: "🌿"
+    tagline: "Version control is the entry ticket to every team and every pipeline."
+    est_weeks: 3
+    courses: [git]
+    learn: |
+      - The object model (blobs, trees, commits, the DAG) — then commands stop being magic.
+      - Branching, merging, rebasing; undoing things safely (`reflog` is your parachute).
+      - Remotes, pull requests, code review etiquette, and team workflows.
+    build: |
+      - Move *everything* you make into Git today — configs, scripts, notes.
+      - Simulate a team of two (two clones): create a merge conflict on purpose and
+        resolve it both by merge and by rebase.
+      - Self-host a Gitea instance on your server and mirror your repos to it.
+    done_when: |
+      - You can recover from a botched rebase without panic or `rm -rf`.
+      - Branches, PRs, and clean commit messages are habit, not ceremony.
+
+  - slug: web-databases
+    title: "Web servers, TLS & databases"
+    icon: "🕸️"
+    tagline: "Run the things developers build: serve it, secure it, store its data."
+    est_weeks: 4
+    learn: |
+      - Nginx as web server and reverse proxy; virtual hosts, upstreams, caching headers.
+      - TLS in practice: certificates, Let's Encrypt/self-signed CAs, redirect to HTTPS.
+      - Relational basics with PostgreSQL: users, backups (`pg_dump`), simple SQL,
+        connection limits — enough to *operate* a database, not design one.
+      - Running apps as systemd services with proper logging and restarts.
+    build: |
+      - Deploy a real app (a Django project is perfect) behind Nginx with TLS on your VPS.
+      - Break it and read the logs: kill the app, revoke the cert, fill the disk.
+      - Script a nightly `pg_dump` backup with rotation, then **actually restore it once**.
+    done_when: |
+      - You have a URL you can send someone that hits an app *you* deployed end-to-end.
+      - "It's a 502" tells you exactly which hop to look at first.
+
+  - slug: containers
+    title: "Containers (Docker)"
+    icon: "🐳"
+    tagline: "Package once, run anywhere. Namespaces and cgroups, not magic."
+    est_weeks: 4
+    courses: [docker]
+    learn: |
+      - Images vs containers, layers, registries; writing small, cache-friendly Dockerfiles.
+      - Volumes and persistent data; container networking; Docker Compose.
+      - What a container *is*: namespaces, cgroups, overlayfs — the deep dives here cover it.
+      - Multi-stage builds, non-root containers, image scanning basics.
+    build: |
+      - Do the **Docker course labs**, then containerize the app from the previous stage:
+        app + PostgreSQL + Nginx in one `docker-compose.yml`.
+      - Shrink an image: take a naive build and cut it (multi-stage, slim base, .dockerignore).
+      - Inspect a running container from the host: find its processes, netns, and cgroup.
+    done_when: |
+      - Your whole stack starts with one `docker compose up` on a clean machine.
+      - You can explain to someone why a container is not a VM — with evidence from `/proc`.
+
+  - slug: cicd
+    title: "CI/CD pipelines"
+    icon: "🚀"
+    tagline: "If deploying is scary, automate it until it's boring."
+    est_weeks: 4
+    courses: [cicd]
+    learn: |
+      - The pipeline model: build → test → package → deploy; fail fast, cache well.
+      - GitHub Actions (or Gitea Actions/Woodpecker if you self-host): workflows,
+        runners, secrets, environments, artifacts.
+      - Building and pushing Docker images from CI; versioning and tagging strategy.
+      - Deployment strategies: rolling, blue-green, canary — and rollback plans.
+    build: |
+      - Do the **CI/CD course labs**, then wire a full pipeline for your containerized app:
+        push to main → tests run → image builds → deploys to your VPS.
+      - Add a self-hosted runner (offline-friendly) and a status badge to the repo.
+      - Break the tests on purpose and watch the pipeline protect production.
+    done_when: |
+      - You haven't deployed by hand in weeks and a rollback is one command or click.
+
+  - slug: cloud
+    title: "Cloud & virtual infrastructure"
+    icon: "☁️"
+    tagline: "Someone else's computers, your responsibility. Concepts over any one vendor."
+    est_weeks: 5
+    learn: |
+      - Core concepts every provider shares: compute instances, images, block/object
+        storage, VPCs/private networks, security groups, load balancers, managed DBs.
+      - One provider hands-on (any accessible VPS provider works — Hetzner, a local
+        cloud, or AWS free tier if reachable); the console *and* its CLI.
+      - IAM: least privilege, access keys, why the root account is for break-glass only.
+      - Cost awareness: what actually bills you, and how to cap it.
+    build: |
+      - Recreate your deployment in the cloud: private network, one small instance,
+        firewall rules, object-storage backups.
+      - Do it once in the web console, then destroy everything and redo it entirely
+        from the CLI — write down every step (that list becomes IaC in the next stage).
+    done_when: |
+      - You can stand up (and tear down!) a secure VM + network + storage without the docs.
+      - Nothing in your account runs that you can't explain or afford.
+
+  - slug: iac
+    title: "Infrastructure as Code"
+    icon: "🏗️"
+    tagline: "If it isn't in Git, it doesn't exist. Servers become cattle, not pets."
+    est_weeks: 5
+    learn: |
+      - **Terraform/OpenTofu**: providers, resources, state, `plan` vs `apply`, modules.
+      - **Ansible**: inventories, playbooks, roles, idempotency, Vault for secrets.
+      - When to use which: provision with Terraform, configure with Ansible.
+      - Drift, state management, and reviewing infra changes like code changes.
+    build: |
+      - Turn the CLI checklist from the cloud stage into Terraform — `terraform destroy
+        && terraform apply` must yield the same working stack.
+      - Write an Ansible playbook that takes a blank Debian VM to "hardened app server"
+        (users, SSH config, firewall, Docker, your app) — test it on a fresh VM.
+      - Put both in Git with CI that runs `terraform plan` / `ansible-lint` on PRs.
+    done_when: |
+      - Rebuilding your entire infrastructure from an empty account is one command
+        and zero fear.
+
+  - slug: kubernetes
+    title: "Container orchestration (Kubernetes)"
+    icon: "☸️"
+    tagline: "Compose, but for a fleet: scheduling, self-healing, scaling."
+    est_weeks: 6
+    learn: |
+      - Core objects: Pods, Deployments, Services, Ingress, ConfigMaps, Secrets.
+      - How the cluster works: control plane, kubelet, the reconciliation loop.
+      - Storage (PV/PVC), probes and resource limits, rolling updates, `kubectl` fluency.
+      - Helm basics for packaging; when Kubernetes is overkill (often!).
+    build: |
+      - Run **k3s** on your own VM (perfect offline-friendly single-node cluster).
+      - Migrate your Compose stack to manifests: Deployment + Service + Ingress +
+        Secret, with liveness/readiness probes and resource limits.
+      - Kill the pod, kill the node process, roll out a bad image — watch it heal
+        and practice `kubectl rollout undo`.
+    done_when: |
+      - You can debug a CrashLoopBackOff with `kubectl describe` and `logs` calmly.
+      - You can argue *for and against* using Kubernetes for a given project.
+
+  - slug: observability
+    title: "Monitoring, logging & observability"
+    icon: "📈"
+    tagline: "If you can't see it, you can't run it. Find out before your users do."
+    est_weeks: 4
+    learn: |
+      - Metrics with **Prometheus**: exporters, PromQL basics, recording rules.
+      - Dashboards with **Grafana**; logs with **Loki** or journald aggregation.
+      - Alerting that doesn't cry wolf: symptoms over causes, runbooks per alert.
+      - The golden signals (latency, traffic, errors, saturation) and SLOs.
+    build: |
+      - Add node_exporter + Prometheus + Grafana to your stack (all self-hostable
+        and offline-friendly) and build one dashboard for your app.
+      - Define two alerts that page you (disk filling, app down) — with a runbook
+        link in the alert message. Trigger both for real.
+      - Do a fire drill: have a friend break something; diagnose only from dashboards.
+    done_when: |
+      - When something breaks, you check *your* graphs before anything else — and
+        they usually already know.
+
+  - slug: sre-security
+    title: "Hero tier: SRE, security & design"
+    icon: "🦸"
+    tagline: "From running systems to engineering reliability — this stage never really ends."
+    est_weeks: 8
+    learn: |
+      - SRE practice: SLIs/SLOs, error budgets, blameless postmortems, toil reduction.
+      - DevSecOps: secret management (Vault/sops), image & dependency scanning,
+        supply-chain awareness, least-privilege everywhere.
+      - System design for operators: scaling, caching, queues, backups/DR, capacity.
+      - Reading production war stories — other people's outages are free education.
+    build: |
+      - Write a real postmortem for the worst incident your own stack has had.
+      - Threat-model your platform: how would you break in? Fix the top three findings.
+      - Run a game day: restore *everything* from backups onto a fresh machine,
+        timed. That time is your real disaster-recovery answer.
+      - Mentor someone one stage behind you — teaching is the final proof (Feynman!).
+    done_when: |
+      - You design systems assuming failure, measure reliability instead of guessing,
+        and your team trusts your postmortems. Congratulations — you're the hero. 🎓

@@ -7,6 +7,7 @@ from exams.models import ExamAttempt, Quiz
 from labs.models import Lab, LabAttempt
 from recall.models import Flashcard
 from recall.services import review_counts
+from roadmap.services import roadmap_overview
 from . import services as L
 from .models import LessonProgress, Note
 
@@ -49,6 +50,7 @@ def dashboard(request):
             "lessons_learned": LessonProgress.objects.filter(
                 user=user, status=LessonProgress.LEARNED
             ).count(),
+            "roadmap": roadmap_overview(user),
         },
     )
 

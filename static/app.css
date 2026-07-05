@@ -169,3 +169,59 @@ textarea { min-height: 120px; resize: vertical; font-family: ui-monospace, "Casc
 .tag-diff.challenge { background: #fee2e2; color: var(--danger); }
 .flash-msg { background: var(--good-bg); color: var(--good); padding: 10px 14px; border-radius: 9px; margin-bottom: 14px; }
 hr { border: none; border-top: 1px solid var(--line); margin: 18px 0; }
+
+/* Roadmap — header card */
+.roadmap-header-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; }
+.roadmap-current { font-size: 18px; font-weight: 700; }
+.roadmap-count { color: var(--muted); font-size: 14px; white-space: nowrap; }
+.roadmap-map { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; }
+.roadmap-map a { width: 36px; height: 36px; flex: 0 0 36px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center; font-size: 17px;
+  border: 2px solid var(--line); background: var(--surface); transition: transform .12s; }
+.roadmap-map a:hover { text-decoration: none; transform: scale(1.12); }
+.roadmap-map a.done { border-color: var(--good); background: var(--good-bg); }
+.roadmap-map a.current { border-color: var(--brand); box-shadow: 0 0 0 3px #e0e7ff; }
+.roadmap-map .map-link { width: 12px; height: 2px; background: var(--line); flex: 0 0 12px; }
+
+/* Roadmap — timeline */
+.timeline { list-style: none; margin: 22px 0 0; padding: 0; position: relative; }
+.timeline::before { content: ""; position: absolute; left: 27px; top: 10px; bottom: 10px;
+  width: 3px; background: var(--line); border-radius: 2px; }
+.tl-item { position: relative; padding: 0 0 10px 78px; }
+.tl-item.done::before { content: ""; position: absolute; left: 27px; top: 0; bottom: 0;
+  width: 3px; background: var(--good); border-radius: 2px; }
+.tl-node { position: absolute; left: 0; top: 0; width: 56px; height: 56px; border-radius: 50%;
+  background: var(--surface); border: 3px solid var(--line); display: flex; align-items: center;
+  justify-content: center; font-size: 25px; box-shadow: var(--shadow); z-index: 1; }
+.tl-item.done .tl-node { border-color: var(--good); background: var(--good-bg); }
+.tl-item.current .tl-node { border-color: var(--brand); animation: tl-pulse 2.2s infinite; }
+@keyframes tl-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(79,70,229,.35); }
+  70% { box-shadow: 0 0 0 12px rgba(79,70,229,0); }
+  100% { box-shadow: 0 0 0 0 rgba(79,70,229,0); }
+}
+.tl-check { position: absolute; right: -4px; bottom: -4px; width: 20px; height: 20px;
+  border-radius: 50%; background: var(--good); color: #fff; font-size: 12px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center; border: 2px solid var(--surface); }
+.tl-item.current .stage-card { border-color: var(--brand); box-shadow: 0 0 0 3px #e0e7ff, var(--shadow); }
+.tl-item.done .stage-card { border-color: var(--good-bg); }
+
+/* Roadmap — stage cards */
+.stage-kicker { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
+.stage-title { margin: 0; font-size: 18px; }
+.stage-tagline { margin: 3px 0 0; font-size: 14px; }
+.you-are-here { color: var(--brand); font-size: 12px; font-weight: 700; }
+.stage-courses { margin: 12px 0 2px; }
+.stage-course { margin-bottom: 10px; }
+.stage-course-row { display: flex; justify-content: space-between; font-size: 14px; margin-bottom: 3px; }
+.stage-card details { margin-top: 10px; border: 1px solid var(--line); border-radius: 9px; padding: 9px 13px; }
+.stage-card details[open] { background: #fafbfe; }
+.stage-card summary { cursor: pointer; font-weight: 600; font-size: 14px; }
+.stage-card details .prose { font-size: 14px; }
+.stage-card details .prose ul { margin: 8px 0 2px; }
+@media (max-width: 880px) {
+  .timeline::before { left: 19px; }
+  .tl-item { padding-left: 56px; }
+  .tl-item.done::before { left: 19px; }
+  .tl-node { width: 40px; height: 40px; font-size: 18px; }
+}

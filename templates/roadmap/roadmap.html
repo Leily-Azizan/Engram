@@ -1,0 +1,118 @@
+{% extends 'base.html' %}
+{% block title %}DevOps Roadmap · Engram{% endblock %}
+{% block topbar %}DevOps Roadmap{% endblock %}
+{% block content %}
+<h1>🗺️ The road to DevOps</h1>
+<p class="subtitle">Zero to hero, one stage at a time. Each stage tells you what to learn, what to build, and how to know you're done.</p>
+
+<div class="card roadmap-header">
+  <div class="roadmap-header-row">
+    <div>
+      {% if current %}
+        <div class="muted" style="font-size:13px;">📍 You are here</div>
+        <div class="roadmap-current">{{ current.stage.icon }} Stage {{ current.stage.order }} — {{ current.stage.title }}</div>
+      {% else %}
+        <div class="roadmap-current">🎓 Roadmap complete — you did it!</div>
+      {% endif %}
+    </div>
+    <div class="roadmap-count"><strong>{{ done }}</strong>/{{ total }} stages done</div>
+  </div>
+  <div class="bar good" style="margin:10px 0 12px;"><span style="width:{{ pct }}%"></span></div>
+  <div class="roadmap-map">
+    {% for row in rows %}
+      <a href="#stage-{{ row.stage.slug }}"
+         class="{% if row.status == 'done' %}done{% elif row.is_current %}current{% endif %}"
+         title="Stage {{ row.stage.order }}: {{ row.stage.title }}">{{ row.stage.icon }}</a>
+      {% if not forloop.last %}<span class="map-link"></span>{% endif %}
+    {% endfor %}
+  </div>
+</div>
+
+<ul class="timeline">
+  {% for row in rows %}
+  <li id="stage-{{ row.stage.slug }}" class="tl-item {% if row.status == 'done' %}done{% endif %} {% if row.is_current %}current{% endif %}">
+    <div class="tl-node">{{ row.stage.icon }}{% if row.status == 'done' %}<span class="tl-check">✓</span>{% endif %}</div>
+    <div class="card stage-card">
+      <div class="stage-head">
+        <div>
+          <div class="stage-kicker">
+            <span class="badge brand">Stage {{ row.stage.order }}</span>
+            {% if row.stage.est_weeks %}<span class="badge slate">~{{ row.stage.est_weeks }} wk</span>{% endif %}
+            {% if row.status == 'done' %}<span class="badge emerald">Done ✓</span>
+            {% elif row.status == 'in_progress' %}<span class="badge amber">In progress</span>
+            {% elif row.is_current %}<span class="badge amber">Up next</span>
+            {% else %}<span class="badge slate">Later</span>{% endif %}
+            {% if row.is_current %}<span class="you-are-here">📍 you are here</span>{% endif %}
+          </div>
+          <h3 class="stage-title">{{ row.stage.title }}</h3>
+          {% if row.stage.tagline %}<p class="muted stage-tagline">{{ row.stage.tagline }}</p>{% endif %}
+        </div>
+      </div>
+
+      {% if row.courses %}
+        <div class="stage-courses">
+          {% for cr in row.courses %}
+            <div class="stage-course">
+              <div class="stage-course-row">
+                <a href="{{ cr.course.get_absolute_url }}">{{ cr.course.icon }} {{ cr.course.name }}</a>
+                <span class="muted">{{ cr.progress.learned }}/{{ cr.progress.total }} lessons · {{ cr.progress.pct }}%</span>
+              </div>
+              <div class="bar good"><span style="width:{{ cr.progress.pct }}%"></span></div>
+            </div>
+          {% endfor %}
+        </div>
+      {% endif %}
+
+      {% if row.stage.learn_md %}
+        <details {% if row.is_current %}open{% endif %}>
+          <summary>📖 What to learn</summary>
+          <div class="prose">{{ row.stage.learn_html|safe }}</div>
+        </details>
+      {% endif %}
+      {% if row.stage.build_md %}
+        <details {% if row.is_current %}open{% endif %}>
+          <summary>🛠️ What to build</summary>
+          <div class="prose">{{ row.stage.build_html|safe }}</div>
+        </details>
+      {% endif %}
+      {% if row.stage.done_when_md %}
+        <details>
+          <summary>✅ You're done when…</summary>
+          <div class="prose">{{ row.stage.done_when_html|safe }}</div>
+        </details>
+      {% endif %}
+
+      <div class="btn-row" style="margin-top:12px;">
+        {% if row.status == 'done' %}
+          <form method="post" action="{% url 'stage_update' %}">{% csrf_token %}
+            <input type="hidden" name="stage_id" value="{{ row.stage.id }}">
+            <input type="hidden" name="status" value="in_progress">
+            <button class="btn sm ghost" type="submit">↺ Reopen</button>
+          </form>
+        {% else %}
+          {% if row.status == 'not_started' %}
+            <form method="post" action="{% url 'stage_update' %}">{% csrf_token %}
+              <input type="hidden" name="stage_id" value="{{ row.stage.id }}">
+              <input type="hidden" name="status" value="in_progress">
+              <button class="btn sm {% if row.is_current %}primary{% endif %}" type="submit">▶ Start this stage</button>
+            </form>
+          {% endif %}
+          <form method="post" action="{% url 'stage_update' %}">{% csrf_token %}
+            <input type="hidden" name="stage_id" value="{{ row.stage.id }}">
+            <input type="hidden" name="status" value="done">
+            <button class="btn sm good" type="submit">✔ Mark complete</button>
+          </form>
+          {% if row.status == 'in_progress' %}
+            <form method="post" action="{% url 'stage_update' %}">{% csrf_token %}
+              <input type="hidden" name="stage_id" value="{{ row.stage.id }}">
+              <input type="hidden" name="status" value="not_started">
+              <button class="btn sm ghost" type="submit">Reset</button>
+            </form>
+          {% endif %}
+        {% endif %}
+      </div>
+    </div>
+  </li>
+  {% endfor %}
+</ul>
+{% endblock %}
