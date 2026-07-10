@@ -2,7 +2,7 @@ chapter:
   title: "Essential System Services"
   slug: system-services
   order: 9
-  summary: "Keep time in sync, manage logs with systemd-journald and syslog, and understand mail/print basics."
+  summary: "Keep time in sync, manage logs with systemd-journald and syslog, write and override systemd units, and understand mail/print basics."
 
 lessons:
   - title: "System logging and time"
@@ -109,9 +109,263 @@ lessons:
           timedatectl              # check "System clock synchronized: yes"
           ```
 
+  - title: "systemd units: write, wire, and override services"
+    slug: systemd-units
+    order: 2
+    est_minutes: 30
+    summary: "Unit file anatomy ([Unit]/[Service]/[Install]), dependencies vs ordering, Type=, the stop/kill sequence, and drop-in overrides with systemctl edit."
+    body: |
+      ## What a unit file is
+
+      Everything systemd manages — services, mounts, timers, targets — is
+      described by a small INI-style **unit file**. Three directories matter,
+      and their precedence is the whole trick:
+
+      ```
+      /usr/lib/systemd/system/   vendor units (installed by packages — don't edit)
+      /run/systemd/system/       runtime units (generated, gone after reboot)
+      /etc/systemd/system/       admin units (yours — highest priority)
+      ```
+
+      A unit in `/etc` **shadows** the vendor unit of the same name. See the
+      full effective picture with:
+
+      ```bash
+      systemctl cat nginx.service       # every file + drop-in that applies
+      systemctl show nginx -p FragmentPath,DropInPaths
+      ```
+
+      ## Anatomy: the three sections
+
+      ```ini
+      [Unit]
+      Description=A high performance web server and a reverse proxy server
+      Documentation=man:nginx(8)
+      After=network.target nss-lookup.target
+      Wants=uwsgi.service
+
+      [Service]
+      Type=forking
+      PIDFile=/run/nginx.pid
+      ExecStartPre=/usr/sbin/nginx -t -q -g 'daemon on; master_process on;'
+      ExecStart=/usr/sbin/nginx -g 'daemon on; master_process on;'
+      ExecReload=/usr/sbin/nginx -g 'daemon on; master_process on;' -s reload
+      ExecStop=-/sbin/start-stop-daemon --quiet --stop --retry QUIT/5 --pidfile /run/nginx.pid
+      TimeoutStopSec=5
+      KillMode=mixed
+
+      [Install]
+      WantedBy=multi-user.target
+      ```
+
+      **`[Unit]` — identity and relationships.** Two ideas people mix up:
+
+      | Directive | Question it answers |
+      |-----------|--------------------|
+      | `After=` / `Before=` | *When* do I start relative to X? (ordering only) |
+      | `Wants=` | Start X with me; keep going if X fails (soft dep) |
+      | `Requires=` | Start X with me; if X fails/stops, stop me too (hard dep) |
+      | `Conflicts=` | X and I can never run at the same time |
+
+      `Requires=` **without** `After=` starts both *in parallel* — if you need
+      X up first, you must say both. Prefer `Wants=` unless the service is
+      truly useless without the dependency; hard deps cause cascade failures.
+
+      **`[Service]` — how to run it.** `Type=` tells systemd when to consider
+      the service "started":
+
+      - `simple` (default) — the `ExecStart` process *is* the service; started
+        as soon as it's forked.
+      - `forking` — classic daemons that fork and exit the parent; systemd
+        waits for the parent to exit and tracks the child via `PIDFile=`.
+      - `oneshot` — runs to completion (setup scripts); pair with
+        `RemainAfterExit=yes`.
+      - `notify` — the service itself tells systemd "ready" via `sd_notify()`
+        — the most precise.
+
+      `ExecStartPre=` runs checks first (nginx validates its config — a bad
+      config fails the *start*, it doesn't kill a running server). A leading
+      `-` on any `Exec*` line means "ignore this command's failure".
+
+      **The stop sequence** (read `ExecStop` → `TimeoutStopSec` → `KillMode`
+      as one story):
+
+      1. `systemctl stop` runs `ExecStop=` (here: graceful `QUIT`, retried 5s).
+      2. Still alive after `TimeoutStopSec=5`? systemd sends **SIGTERM**.
+      3. Still alive? **SIGKILL** — to whom depends on `KillMode=`:
+         `control-group` (default: everyone), `mixed` (SIGTERM to main
+         process only, SIGKILL to the whole group), `process` (main only —
+         leaks workers, avoid).
+
+      **`[Install]` — what `enable` means.** `WantedBy=multi-user.target`
+      means `systemctl enable` creates a symlink in
+      `/etc/systemd/system/multi-user.target.wants/`. Enable is *just a
+      symlink*; start is *running it now*. Hence the pairs:
+
+      ```bash
+      sudo systemctl enable --now myapp.service    # symlink + start
+      systemctl is-enabled myapp; systemctl is-active myapp
+      ```
+
+      ## Overriding a vendor unit — never edit /usr/lib
+
+      Package updates overwrite `/usr/lib/systemd/system/nginx.service`. To
+      change *one* setting, use a **drop-in**:
+
+      ```bash
+      sudo systemctl edit nginx.service
+      ```
+
+      This opens an editor on
+      `/etc/systemd/system/nginx.service.d/override.conf` — write **only the
+      sections and keys you want to change**; everything else is inherited:
+
+      ```ini
+      [Service]
+      TimeoutStopSec=30
+      ```
+
+      Careful with list-type directives: `Exec*` lines *append*, so to replace
+      one you must clear it first (`ExecStart=` on an empty line, then the new
+      value). `sudo systemctl edit --full` copies the whole unit into `/etc`
+      instead (full shadow). After *any* on-disk change:
+
+      ```bash
+      sudo systemctl daemon-reload      # re-parse unit files
+      sudo systemctl restart nginx
+      systemctl cat nginx               # verify what's in effect
+      ```
+    deep_dive: |
+      ### cgroups, readiness, and why daemon-reload exists
+
+      **systemd tracks services with cgroups, not PIDs.** Every service runs in
+      its own **control group** (`/sys/fs/cgroup/system.slice/nginx.service/`),
+      and the kernel keeps the member list — so even if a daemon forks twenty
+      workers or double-forks to escape its parent, systemd still knows exactly
+      which processes belong to it (`systemd-cgls` shows the tree). That is
+      what makes `KillMode=control-group` airtight in a way old SysV scripts,
+      which could only guess via `pidof`/PID files, never were. It's also why
+      `systemctl status` can show you every process of a service and its
+      aggregate CPU/memory: the cgroup *is* the accounting boundary.
+
+      **`Type=` is really a readiness protocol.** Ordering (`After=`) is only
+      useful if "started" means "ready to serve", and each type defines that
+      moment differently. `forking` trusts the SysV convention — parent exits
+      ⇒ child is initialized — and needs `PIDFile=` because after the fork the
+      *main PID changes* and systemd must be told which process is the real
+      daemon. `notify` closes the gap properly: the service writes `READY=1`
+      into a Unix datagram socket systemd passed via `$NOTIFY_SOCKET`, so
+      dependents start at the exact moment the service says so. `simple`
+      merely means "the process exists" — which is why services that depend
+      on a `simple` unit sometimes race it during boot.
+
+      **`daemon-reload` exists because systemd runs from memory.** PID 1
+      parses every unit file (plus its drop-ins, in lexical order) into an
+      in-memory dependency graph at boot; the files on disk are just source
+      code. Editing a file changes nothing until `daemon-reload` re-parses it
+      — systemd even prints a warning if a unit's on-disk mtime is newer than
+      what it has loaded. `enable`, meanwhile, never touches that graph
+      directly: it materializes the `[Install]` section into `.wants/`
+      symlinks, and at boot the target simply pulls in everything its
+      `.wants/` directory points at. That's the whole "registry": readable
+      with `ls`, fixable with `ln -s`, no hidden database anywhere.
+    cards:
+      - front: "In a unit file, what is the difference between `After=` and `Requires=`?"
+        back: "`After=` is *ordering only* (start me after X). `Requires=` is a *hard dependency* (start X with me; if X fails, I stop) — but it implies no ordering, so you usually need both."
+      - front: "What does `Type=forking` mean, and what directive usually accompanies it?"
+        back: "The daemon forks and the parent exits — systemd considers it started when the parent exits, and needs `PIDFile=` to know which child is the main process."
+      - front: "How do you change one setting of a vendor unit without editing /usr/lib?"
+        back: "`sudo systemctl edit <unit>` — writes a drop-in at `/etc/systemd/system/<unit>.d/override.conf` containing only the keys you override; then `daemon-reload`."
+      - front: "What happens, step by step, when `systemctl stop` can't stop a service gracefully?"
+        back: "1) `ExecStop=` runs; 2) after `TimeoutStopSec` systemd sends SIGTERM; 3) still alive → SIGKILL, scoped by `KillMode=` (control-group / mixed / process)."
+      - cloze: "Admin units live in `{{c1::/etc/systemd/system}}` and shadow vendor units in `/usr/lib/systemd/system`; after editing any unit file you must run `systemctl {{c2::daemon-reload}}`; `systemctl enable` just creates a symlink in the target's `{{c3::.wants}}` directory."
+    feynman:
+      - "Explain to a junior engineer why `systemctl enable` and `systemctl start` are different operations, and what actually happens on disk for each."
+      - "Walk through the nginx stop sequence (ExecStop → SIGTERM → SIGKILL) and explain what KillMode=mixed changes about the final step."
+    labs:
+      - title: "Ship your own service, then override it"
+        slug: lab-write-systemd-unit
+        difficulty: core
+        est_minutes: 30
+        scenario: |
+          You wrote a tiny web service and want it managed like a real daemon:
+          started at boot, restarted on crash, cleanly stoppable — and then you
+          need to tweak it *without* touching the original unit file, the way
+          you'd override a vendor package's unit in production.
+        deliverable: |
+          1. Create `/opt/heartbeat/beat.sh` — an executable script that loops
+             forever, logging a line every 5 seconds (stdout is fine — journald
+             will catch it).
+          2. Write `/etc/systemd/system/heartbeat.service` with a `[Unit]`
+             description, `Type=simple`, `Restart=on-failure`, and
+             `WantedBy=multi-user.target`. Enable and start it.
+          3. Prove it works: show its status, follow its journal, kill the
+             process by PID and show systemd restarted it.
+          4. Now change its restart delay to 10 s using a **drop-in override**
+             (not by editing the unit), and prove the override is active with
+             `systemctl cat heartbeat`.
+          5. Clean up: stop, disable, remove the files, `daemon-reload`.
+        hints: |
+          - Script: `#!/bin/bash` + `while true; do echo "alive $(date)"; sleep 5; done`
+          - Minimal `[Service]`: `ExecStart=/opt/heartbeat/beat.sh`, `Restart=on-failure`, `RestartSec=2`
+          - `sudo systemctl enable --now heartbeat`
+          - Watch the restart: `journalctl -u heartbeat -f` in one terminal,
+            `sudo kill $(systemctl show -p MainPID --value heartbeat)` in another.
+          - Override: `sudo systemctl edit heartbeat` → `[Service]` + `RestartSec=10`
+        solution: |
+          ```bash
+          # 1. the "daemon"
+          sudo mkdir -p /opt/heartbeat
+          sudo tee /opt/heartbeat/beat.sh >/dev/null <<'EOF'
+          #!/bin/bash
+          while true; do echo "alive $(date --iso-8601=seconds)"; sleep 5; done
+          EOF
+          sudo chmod +x /opt/heartbeat/beat.sh
+
+          # 2. the unit
+          sudo tee /etc/systemd/system/heartbeat.service >/dev/null <<'EOF'
+          [Unit]
+          Description=Heartbeat demo service
+
+          [Service]
+          Type=simple
+          ExecStart=/opt/heartbeat/beat.sh
+          Restart=on-failure
+          RestartSec=2
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          sudo systemctl daemon-reload
+          sudo systemctl enable --now heartbeat
+
+          # 3. prove it
+          systemctl status heartbeat --no-pager
+          journalctl -u heartbeat -n 5
+          sudo kill $(systemctl show -p MainPID --value heartbeat)
+          sleep 3; systemctl status heartbeat --no-pager   # new MainPID, restart counter +1
+
+          # 4. drop-in override (non-interactive equivalent of systemctl edit)
+          sudo mkdir -p /etc/systemd/system/heartbeat.service.d
+          sudo tee /etc/systemd/system/heartbeat.service.d/override.conf >/dev/null <<'EOF'
+          [Service]
+          RestartSec=10
+          EOF
+          sudo systemctl daemon-reload
+          systemctl cat heartbeat            # shows unit + the drop-in
+          systemctl show -p RestartUSec --value heartbeat   # 10s
+
+          # 5. cleanup
+          sudo systemctl disable --now heartbeat
+          sudo rm -rf /etc/systemd/system/heartbeat.service \
+                      /etc/systemd/system/heartbeat.service.d \
+                      /opt/heartbeat
+          sudo systemctl daemon-reload
+          ```
+
   - title: "Mail and printing basics"
     slug: mail-and-printing
-    order: 2
+    order: 3
     est_minutes: 14
     summary: "The MTA concept and the CUPS print stack at a high level."
     body: |
@@ -191,7 +445,7 @@ quiz:
   title: "Essential System Services — chapter exam"
   slug: lpic1-system-services-exam
   scope: chapter
-  description: "Logging, time, mail, and printing."
+  description: "Logging, time, systemd units, mail, and printing."
   questions:
     - type: command
       text: "Follow the live logs of the systemd unit named nginx."
@@ -226,3 +480,37 @@ quiz:
       choices:
         - {text: "True", correct: true}
         - {text: "False"}
+    - type: mcq
+      text: "In a unit file, which directive makes X a hard dependency (if X fails, this unit stops too)?"
+      explanation: "`Requires=` is the hard dependency; `Wants=` is soft; `After=` is ordering only."
+      choices:
+        - {text: "Requires=", correct: true}
+        - {text: "Wants="}
+        - {text: "After="}
+        - {text: "Before="}
+    - type: mcq
+      text: "Where should an administrator's own unit files (and overrides) live?"
+      explanation: "/etc/systemd/system — it shadows the vendor units in /usr/lib/systemd/system."
+      choices:
+        - {text: "/etc/systemd/system", correct: true}
+        - {text: "/usr/lib/systemd/system"}
+        - {text: "/run/systemd/system"}
+        - {text: "/var/lib/systemd"}
+    - type: command
+      text: "You edited a unit file on disk. Make systemd re-read its configuration."
+      explanation: "`systemctl daemon-reload` re-parses unit files into PID 1's in-memory graph."
+      answers:
+        - {value: "(sudo )?systemctl daemon-reload", match: regex}
+    - type: command
+      text: "Create a drop-in override for nginx.service using the built-in editor workflow."
+      explanation: "`systemctl edit nginx.service` writes /etc/systemd/system/nginx.service.d/override.conf."
+      answers:
+        - {value: "(sudo )?systemctl edit nginx(\\.service)?", match: regex}
+    - type: mcq
+      text: "A service with Type=forking is considered started when…"
+      explanation: "The classic daemon convention: the parent exits once the child is initialized; PIDFile= tells systemd which process is the daemon."
+      choices:
+        - {text: "the ExecStart parent process exits", correct: true}
+        - {text: "the ExecStart process is forked"}
+        - {text: "it writes READY=1 to the notify socket"}
+        - {text: "its port starts accepting connections"}
