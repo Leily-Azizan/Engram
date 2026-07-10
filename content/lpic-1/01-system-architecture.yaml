@@ -2,7 +2,7 @@ chapter:
   title: "System Architecture"
   slug: system-architecture
   order: 1
-  summary: "How a Linux system boots, how it detects hardware, and how to move between boot targets and shut down safely."
+  summary: "How a Linux system boots, how it detects hardware, how kernel modules and drivers extend it at runtime, and how to move between boot targets and shut down safely."
 
 lessons:
   - title: "Determine and configure hardware settings"
@@ -393,11 +393,312 @@ lessons:
           sudo systemctl isolate multi-user.target
           ```
 
+  - title: "Kernel modules & drivers: extend the kernel, then write your own"
+    slug: kernel-modules-drivers
+    order: 4
+    est_minutes: 35
+    summary: "What modules add to a running kernel (filesystems, protocols, drivers), insmod vs modprobe in depth, what a driver really is, and writing + building your first .ko."
+    body: |
+      ## The kernel grows at runtime
+
+      Linux is a **monolithic** kernel — drivers and filesystems run *inside*
+      it, in ring 0 — but it's monolithic with a trapdoor: **loadable kernel
+      modules** (`.ko` files, "kernel objects"). A module is compiled kernel
+      code that can be linked into the running kernel and removed again,
+      **no reboot, no rebuild**. Your distro ships thousands, ready to load:
+
+      ```bash
+      ls /lib/modules/$(uname -r)/kernel/
+      # arch/ crypto/ drivers/ fs/ net/ sound/ ...
+      find /lib/modules/$(uname -r) -name '*.ko*' | wc -l   # often 5000+
+      ```
+
+      That directory layout *is* the answer to "what can modules add":
+
+      | Category | Example modules | What loading it gives you |
+      |----------|-----------------|---------------------------|
+      | Device drivers | `e1000e`, `nvme`, `usb_storage`, `snd_hda_intel` | The kernel can talk to that NIC / disk / stick / sound chip |
+      | Filesystems | `vfat`, `ntfs3`, `xfs`, **`overlay`** | You can `mount` that format — `overlay` is what Docker image layers run on |
+      | Network features | **`wireguard`**, `bonding`, `vxlan`, `br_netfilter`, `nf_conntrack` | A VPN protocol, NIC teaming, the overlay networks and iptables plumbing Kubernetes CNIs need |
+      | Virtualization | `kvm`, `kvm_intel` / `kvm_amd` | The box becomes a hypervisor — this is what QEMU/libvirt sit on |
+      | Crypto | `aes_ni_intel`, `sha256_ssse3` | Hardware-accelerated primitives for dm-crypt, TLS offload, IPsec |
+
+      This is why module skills are *DevOps* skills, not kernel-hacker trivia:
+      "Docker networking is broken" is often `br_netfilter` not loaded;
+      "can't start a VM" is `kvm_intel` missing or its nested parameter off;
+      `modprobe wireguard` is step zero of a modern VPN.
+
+      ## Loading: insmod vs modprobe
+
+      ```bash
+      sudo insmod /lib/modules/$(uname -r)/kernel/fs/fat/vfat.ko.zst  # exact file, no deps
+      sudo modprobe vfat                                              # name, deps resolved
+      ```
+
+      `insmod` is the raw tool: it hands one file to the kernel and fails with
+      `Unknown symbol` if a dependency isn't already in. `modprobe` is the
+      administrator's tool — it looks the *name* up in
+      `/lib/modules/$(uname -r)/modules.dep` (rebuilt by `depmod`), loads
+      dependencies first, resolves **aliases** (so `modprobe fs-vfat` or a
+      PCI-ID alias from udev also work), and applies your configuration:
+
+      ```bash
+      sudo modprobe -r vfat            # unload (refuses while in use)
+      modprobe --show-depends vfat     # what would be loaded, in order
+      modinfo kvm_intel                # description, license, params, depends
+      ```
+
+      ### Parameters — modules are tunable
+
+      Modules expose knobs. See them with `modinfo -p`, set them at load
+      time, inspect them live under `/sys/module/`:
+
+      ```bash
+      modinfo -p kvm_intel                       # e.g. nested: bool
+      sudo modprobe kvm_intel nested=1           # one-off
+      cat /sys/module/kvm_intel/parameters/nested
+      ```
+
+      ### Making it stick across reboots
+
+      ```
+      /etc/modules-load.d/k8s.conf     # force-load at boot:  br_netfilter
+      /etc/modprobe.d/kvm.conf         # options kvm_intel nested=1
+      /etc/modprobe.d/blacklist.conf   # blacklist pcspkr   (don't autoload)
+      ```
+
+      ## Drivers: modules with hardware on the other end
+
+      A **driver** is a module (or built-in) that implements a device-class
+      interface for one piece of hardware. When it registers, it claims a
+      **major number**; udev (lesson 1) then creates `/dev` nodes whose
+      major/minor route to it. That's how "everything is a file" is
+      implemented: `cat /dev/urandom` → VFS → major lookup → that driver's
+      `read` function runs, in kernel mode, filling your buffer.
+
+      - **Character drivers** — byte streams: terminals, `/dev/urandom`, GPIO.
+      - **Block drivers** — addressable sectors + caching: `nvme`, `sd_mod`.
+      - **Network drivers** — no `/dev` node at all; they register a `netdev`
+        (what `ip link` lists) with the networking stack.
+
+      Drivers arrive **in-tree** (shipped with the kernel — the 5000+ above)
+      or **out-of-tree** (NVIDIA, VirtualBox, some Wi-Fi). Out-of-tree ones
+      are managed by **DKMS**, which recompiles them automatically for every
+      new kernel you install — when a machine boots headless after a kernel
+      update, a failed DKMS build is a classic culprit.
+
+      ## Write your first module
+
+      A minimal module is ~15 lines of C. Two entry points, a license, done:
+
+      ```c
+      // hello.c
+      #include <linux/init.h>
+      #include <linux/module.h>
+
+      static int __init hello_start(void)
+      {
+          pr_info("hello: loaded into the kernel\n");
+          return 0;                      /* nonzero = refuse to load */
+      }
+
+      static void __exit hello_stop(void)
+      {
+          pr_info("hello: unloaded\n");
+      }
+
+      module_init(hello_start);
+      module_exit(hello_stop);
+      MODULE_LICENSE("GPL");
+      MODULE_DESCRIPTION("My first kernel module");
+      ```
+
+      Built not with plain gcc but via **kbuild**, the kernel's own build
+      system — your Makefile just declares the object and delegates:
+
+      ```make
+      obj-m += hello.o
+
+      all:
+      	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
+      clean:
+      	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
+      ```
+
+      You need the **kernel headers** for the running kernel
+      (`pacman -S linux-headers` on Arch/Manjaro, `apt install
+      linux-headers-$(uname -r)` on Debian). Then:
+
+      ```bash
+      make                      # → hello.ko
+      sudo insmod hello.ko      # exactly what insmod is for: a local file
+      sudo dmesg | tail -2      # hello: loaded into the kernel
+      lsmod | grep hello
+      sudo rmmod hello
+      ```
+
+      `pr_info()` is `printf` for the kernel — there's no stdout in ring 0;
+      messages go to the kernel ring buffer you read with `dmesg`. The lab
+      below takes this further: you'll add a parameter and watch it in sysfs.
+    deep_dive: |
+      ### What loading really does, why ring 0 is different, and how a read reaches a driver
+
+      **Loading is dynamic linking into a running kernel.** A `.ko` is a
+      relocatable ELF object. `insmod`/`modprobe` pass it to the
+      `finit_module(2)` syscall; the kernel copies it into kernel address
+      space, applies relocations, and resolves every undefined symbol against
+      the exported kernel symbol table (`/proc/kallsyms` — only symbols marked
+      `EXPORT_SYMBOL` are linkable). Two gates guard the door: **vermagic**
+      (the module must be built for this exact kernel version/config — the
+      real reason you need matching headers) and, with Secure Boot, a
+      **signature check**. Only then does your `module_init` run. `lsmod`'s
+      "Used by" column is a live **refcount**: a mounted vfat filesystem holds
+      a reference on `vfat`, which is precisely why `modprobe -r` refuses —
+      freeing code that's executing would be a use-after-free in the kernel.
+
+      **Ring 0 is power without a safety net.** Your module's code runs with
+      the same privileges as the scheduler: it can touch any memory, talk to
+      any device, and there is no segfault-and-die — a bad pointer is a kernel
+      **oops** (that unit of code dies, kernel marked *tainted*) or a full
+      **panic**. Nothing protects the system from your logic; that's the
+      trade for zero-copy access to hardware and no syscall boundary. It's
+      also why the modern ecosystem grew **eBPF**: verified, sandboxed
+      programs (what Cilium and most observability tools use) give you "run
+      code in the kernel" for tracing/networking *without* the ability to
+      crash it. Rule of thumb: drivers and filesystems need modules;
+      observability and policy increasingly use eBPF.
+
+      **How `read()` finds your driver.** When a char driver registers, it
+      ties a major number to a `struct file_operations` — a table of function
+      pointers (`.open`, `.read`, `.write`, `.ioctl`). `open("/dev/mydev")`
+      walks the VFS to the device inode, reads major/minor from it, looks up
+      the registered `cdev`, and stores its `file_operations` in the file
+      descriptor. From then on every `read(fd, …)` dispatches straight to
+      your `.read` function, executing in kernel mode in the *calling
+      process's* context — it must move data out with `copy_to_user()`,
+      because a user pointer can't be trusted or even assumed mapped. Block
+      drivers slot in lower, behind the page cache and an I/O scheduler;
+      network drivers bypass `/dev` entirely and hand packets to the stack
+      via a `net_device`. Same kernel, three doors — which is why `sda` is a
+      node, `eth0` isn't, and both are driven by modules.
+    cards:
+      - front: "What's the real difference between `insmod` and `modprobe`?"
+        back: "`insmod` loads one exact .ko file, no dependency handling. `modprobe` takes a *name*, resolves dependencies via modules.dep, honors aliases, and applies options/blacklists from /etc/modprobe.d."
+      - front: "Name three capabilities you can add to a running kernel by loading a module."
+        back: "e.g. a filesystem (`overlay` for Docker, `vfat`), a network feature (`wireguard`, `vxlan`, `br_netfilter`), virtualization (`kvm_intel`), a device driver (`nvme`, `e1000e`), crypto accel."
+      - front: "How do you (a) set a module parameter at load time and (b) inspect it on a live system?"
+        back: "(a) `modprobe kvm_intel nested=1` (persist via `options …` in /etc/modprobe.d); (b) `cat /sys/module/kvm_intel/parameters/nested`."
+      - front: "In a kernel module's C source, which two macros wire up the load/unload entry points, and what else is mandatory?"
+        back: "`module_init(fn)` and `module_exit(fn)`; a `MODULE_LICENSE(\"GPL\")` declaration (without it the kernel is tainted and many symbols are unavailable)."
+      - front: "Why does `modprobe -r` sometimes refuse to unload a module?"
+        back: "Its refcount is nonzero — something (a mounted fs, an open device, another module) still uses it. Unloading running code would be a kernel use-after-free."
+      - cloze: "Modules for the running kernel live under `{{c1::/lib/modules/$(uname -r)}}`; dependencies are listed in `modules.dep`, rebuilt by `{{c2::depmod}}`; a module prints to the kernel ring buffer with `pr_info`/`printk`, which you read with `{{c3::dmesg}}`."
+    feynman:
+      - "Explain to a developer why Docker can need `modprobe overlay` and `br_netfilter` before containers work — what do those modules add and why aren't they always loaded?"
+      - "Walk through what happens in the kernel between `sudo insmod hello.ko` and seeing the message in `dmesg`."
+      - "A kernel module and a normal C program both 'run code' — explain three ways life in ring 0 is different (I/O, errors, printing)."
+    labs:
+      - title: "Write, build, and load your own kernel module"
+        slug: lab-write-kernel-module
+        difficulty: challenge
+        est_minutes: 45
+        scenario: |
+          You've loaded other people's modules; time to cross the line and run
+          your own code in ring 0. You'll write a module with a load-time
+          parameter, build it against your running kernel with kbuild, load it
+          with `insmod` (the one time it's the right tool), watch it talk via
+          the ring buffer, and inspect its parameter through sysfs.
+
+          Prereq: kernel headers for your running kernel
+          (`sudo pacman -S linux-headers` on Manjaro — pick the package
+          matching `uname -r`; `sudo apt install linux-headers-$(uname -r)`
+          on Debian/Ubuntu).
+        deliverable: |
+          1. `hello.c`: a module that takes a string parameter `who`
+             (default "world") and logs `hello, <who>!` on load and
+             `goodbye, <who>.` on unload.
+          2. A kbuild `Makefile`; show the build producing `hello.ko`.
+          3. Load it with the default, then unload and reload it with
+             `who=leily`; show both greetings in `dmesg`.
+          4. Show the module in `lsmod`, its metadata in `modinfo hello.ko`,
+             and the live parameter value under `/sys/module/hello/`.
+          5. Unload it and confirm the goodbye message. Bonus: explain why
+             `insmod` (not `modprobe`) is the natural tool here, and what
+             you'd have to do to make `modprobe hello` work.
+        hints: |
+          - Parameter: `static char *who = "world";` then
+            `module_param(who, charp, 0444);` and
+            `MODULE_PARM_DESC(who, "whom to greet");`
+          - Log with `pr_info("hello, %s!\n", who);`
+          - Makefile recipe lines need real tabs; the whole Makefile is
+            `obj-m += hello.o` plus the `make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules` delegation.
+          - Load with a value: `sudo insmod hello.ko who=leily`
+          - Parameter file: `cat /sys/module/hello/parameters/who`
+          - modprobe only searches /lib/modules — that's the bonus answer.
+        solution: |
+          ```c
+          // hello.c
+          #include <linux/init.h>
+          #include <linux/module.h>
+          #include <linux/moduleparam.h>
+
+          static char *who = "world";
+          module_param(who, charp, 0444);
+          MODULE_PARM_DESC(who, "whom to greet");
+
+          static int __init hello_start(void)
+          {
+              pr_info("hello, %s!\n", who);
+              return 0;
+          }
+
+          static void __exit hello_stop(void)
+          {
+              pr_info("goodbye, %s.\n", who);
+          }
+
+          module_init(hello_start);
+          module_exit(hello_stop);
+          MODULE_LICENSE("GPL");
+          MODULE_DESCRIPTION("Greeting module with a parameter");
+          ```
+
+          ```make
+          obj-m += hello.o
+
+          all:
+          	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
+          clean:
+          	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
+          ```
+
+          ```bash
+          make                                    # → hello.ko
+          sudo insmod hello.ko
+          sudo dmesg | tail -1                    # hello, world!
+          lsmod | grep hello
+          modinfo hello.ko                        # license, description, parm: who
+          cat /sys/module/hello/parameters/who    # world
+          sudo rmmod hello
+          sudo insmod hello.ko who=leily
+          sudo dmesg | tail -2                    # goodbye, world. / hello, leily!
+          cat /sys/module/hello/parameters/who    # leily
+          sudo rmmod hello
+          sudo dmesg | tail -1                    # goodbye, leily.
+          ```
+
+          **Bonus:** `insmod` is right because the .ko is a local file outside
+          the module tree. To use `modprobe hello`, copy `hello.ko` into
+          `/lib/modules/$(uname -r)/extra/` (or `kernel/…`), run
+          `sudo depmod -a` to index it into modules.dep, then
+          `sudo modprobe hello` — which is essentially what DKMS automates
+          for out-of-tree drivers on every kernel update.
+
 quiz:
   title: "System Architecture — chapter exam"
   slug: lpic1-system-architecture-exam
   scope: chapter
-  description: "Boot chain, hardware discovery, and systemd targets."
+  description: "Boot chain, hardware discovery, kernel modules and drivers, and systemd targets."
   questions:
     - type: mcq
       text: "Which virtual filesystem would you read to see live CPU information?"
@@ -439,3 +740,35 @@ quiz:
         - {text: "systemctl set-default"}
         - {text: "systemctl enable"}
         - {text: "systemctl mask"}
+    - type: mcq
+      text: "What does modprobe do that insmod does not?"
+      explanation: "modprobe resolves the module *name* via modules.dep, loads dependencies first, and applies /etc/modprobe.d options and blacklists; insmod just loads one exact file."
+      choices:
+        - {text: "Resolves and loads the module's dependencies", correct: true}
+        - {text: "Loads the module into ring 0"}
+        - {text: "Compiles the module first"}
+        - {text: "Verifies the module's checksum"}
+    - type: command
+      text: "Unload the vfat kernel module (dependency-aware)."
+      explanation: "`modprobe -r vfat` — refuses if the module is still in use."
+      answers:
+        - {value: "(sudo )?(modprobe -r|rmmod) vfat", match: regex}
+    - type: mcq
+      text: "You want the br_netfilter module loaded automatically at every boot. Where does that go?"
+      explanation: "A file in /etc/modules-load.d/ lists modules to load at boot; /etc/modprobe.d/ holds options and blacklists."
+      choices:
+        - {text: "/etc/modules-load.d/", correct: true}
+        - {text: "/etc/modprobe.d/blacklist.conf"}
+        - {text: "/lib/modules/"}
+        - {text: "/sys/module/"}
+    - type: command
+      text: "Show a module's description, license, dependencies, and parameters (e.g. for kvm_intel)."
+      explanation: "`modinfo kvm_intel` reads the metadata embedded in the .ko."
+      answers:
+        - {value: "(sudo )?modinfo( -p)? [a-z0-9_]+", match: regex}
+    - type: true_false
+      text: "A pointer bug in a loaded kernel module can crash the whole system, not just the module."
+      explanation: "True — modules run in ring 0 with no memory protection between them and the rest of the kernel; a bad access is an oops or a panic."
+      choices:
+        - {text: "True", correct: true}
+        - {text: "False"}
