@@ -347,14 +347,15 @@ lessons:
   - title: "Edit files with vi/vim (and nano)"
     slug: editing-files
     order: 4
-    est_minutes: 24
-    summary: "Survive and thrive in vi — the editor that's on every Linux box — plus nano for quick edits."
+    est_minutes: 40
+    summary: "Master vi/vim — the editor that's on every Linux box — from survival keys to the operator+motion grammar, plus nano done properly."
     body: |
       ## Why vi/vim matters
 
       `vi` (or `vim`) is on **every** Unix system, even a broken one with no GUI
-      and no extras. The LPIC exam tests it, and one day you'll edit a config on a
-      server where nano isn't installed. Learn the survival set.
+      and no extras. The LPIC exam tests it (objective 103.8), and one day you'll
+      edit a config on a server where nano isn't installed. Learn the survival
+      set first, then the grammar that makes vim genuinely fast.
 
       ## vi's modes — the key idea
 
@@ -362,7 +363,10 @@ lessons:
 
       - **Normal mode** (default) — keys are commands (move, delete, etc.).
       - **Insert mode** — keys type text. Enter with `i`; leave with `Esc`.
-      - **Command-line mode** — `:` for save/quit/search-replace.
+      - **Command-line mode** — `:` for save/quit/search-replace (these are
+        `ex` commands — more in the deep dive).
+      - **Visual mode** — `v` selects text so you can operate on exactly what
+        you see.
 
       ## The survival kit
 
@@ -380,13 +384,123 @@ lessons:
       because you're in normal mode. Press `i` first; press `Esc` then `:wq` to
       save and quit. Stuck? `Esc` then `:q!` always bails out.
 
-      ## nano — the easy alternative
+      ## Level up: vim is a language, not a list of shortcuts
+
+      Normal-mode edits follow a grammar — **[count] operator [count] motion**:
+
+      | Operators (verbs) | Motions (nouns) |
+      |---|---|
+      | `d` delete, `c` change (delete + insert), `y` yank | `w`/`b` next/previous word, `e` end of word |
+      | `>` / `<` indent / unindent | `0` / `^` / `$` line start / first char / end |
+      | `gu` / `gU` lowercase / uppercase | `gg` / `G` / `42G` first / last / line 42 |
+      |  | `f(` / `t(` onto / up-to the next `(` on the line |
+      |  | `{` / `}` previous / next paragraph |
+
+      Compose them and every combination just works:
+
+      ```
+      dw    delete to next word        d$  (or D)  delete to end of line
+      cw    change a word              c$  (or C)  change to end of line
+      3dd   delete 3 lines             dG          delete to end of file
+      d2w   delete two words           yap         yank a paragraph
+      df,   delete up to and incl. the next comma on this line
+      ```
+
+      Doubling an operator applies it to the whole line (`dd`, `yy`, `cc`,
+      `>>`). And the most underrated key in vim: **`.` repeats the last change**
+      — fix one line, then walk down with `j` pressing `.` on each.
+
+      ## Getting into insert mode precisely
+
+      ```
+      i  before cursor     a  after cursor      o  open a NEW line below
+      I  at line start     A  at line end       O  open a new line above
+      r  replace ONE char (no insert mode)      R  overwrite mode
+      s  delete char + insert                   cc change the whole line
+      ```
+
+      ## Visual mode — select first, act second
+
+      - `v` character-wise, `V` line-wise, `Ctrl-v` **block-wise** (columns!).
+      - Select, then apply any operator: `d`, `y`, `>`, `gU`…
+      - Block magic: `Ctrl-v`, select down a column, `I# `, `Esc` → inserts
+        `# ` at the start of every selected line. Instant block comment.
+
+      ## Search & replace properly
+
+      ```
+      /pattern      search forward        ?pattern   search backward
+      n / N         next / previous match  *          search word under cursor
+      :%s/old/new/g     replace in whole file
+      :10,20s/old/new/g replace only on lines 10–20
+      :%s/old/new/gc    ask for confirmation at each match
+      :g/^#/d           delete every line matching a pattern (here: comments)
+      ```
+
+      The `:s` syntax is the same substitution language as `sed` — learn it
+      once, use it in both (the deep dive explains why they're related).
+
+      ## Registers, marks, and more than one file
+
+      - `"ayy` yanks a line into register `a`; `"ap` pastes it — survives other
+        deletes trampling the default register.
+      - `ma` marks the spot as `a`; `` `a `` jumps back to it.
+      - `:e file` edit another file, `:bn`/`:bp` cycle buffers.
+      - `:sp file` / `:vsp file` split the window; `Ctrl-w w` hops between
+        panes — perfect for comparing two configs side by side.
+      - `:r file` inserts a file's contents; `:r !cmd` inserts a **command's
+        output** (e.g. `:r !ip -br a`) right into your document.
+
+      ## Make vim yours: ~/.vimrc
+
+      ```vim
+      set number          " line numbers
+      set incsearch       " jump to matches while typing
+      set hlsearch        " highlight all matches
+      set ignorecase smartcase  " smart case-insensitive search
+      set tabstop=4 shiftwidth=4 expandtab
+      syntax on
+      ```
+
+      Best 30 minutes you'll spend this chapter: run `vimtutor` in a terminal —
+      an interactive tour built into vim itself.
+
+      ## nano — quick, honest, and (usually) there
+
+      nano shows its shortcuts at the bottom (`^` = Ctrl, `M-` = Alt), but the
+      useful set goes beyond save-and-exit:
+
+      ```
+      ^O  write out (save)      ^X  exit        ^G  full help
+      ^W  search                M-W next match  ^\  search & replace
+      ^K  cut line              M-6 copy line   ^U  paste
+      ^_  go to line number     M-U undo        M-E redo
+      ```
+
+      Flags that matter for an admin:
 
       ```bash
-      nano file        # shortcuts shown at the bottom: ^ = Ctrl
-      # ^O write out (save), ^X exit, ^W search
+      nano -w /etc/fstab   # -w = NO line wrapping. Critical: a wrapped fstab
+                           #      or crontab line = a broken entry at boot.
+      nano -l file         # line numbers
+      nano -B file         # keep a backup (file~) on save
       ```
-      Great for quick edits when it's installed — but don't rely on it being there.
+
+      Persist preferences in `~/.nanorc`: `set linenumbers`, `set nowrap`,
+      `set tabsize 4`.
+
+      ## Choosing — and declaring — your editor
+
+      Tools that open an editor for you (`crontab -e`, `git commit`, `visudo`)
+      pick it from the **`VISUAL`/`EDITOR`** environment variables — set
+      `export EDITOR=vim` in `~/.bashrc` (you did exactly this in the
+      environment lab). For sensitive system files, don't open them raw: use
+      the wrappers that lock and validate — `visudo` for sudoers, `vipw` for
+      passwd, or `sudoedit file` to edit a root-owned file with *your* editor
+      config, safely.
+
+      **Exam note:** LPIC-1 tests vi keystrokes directly; for nano and emacs it
+      expects awareness that they exist as alternatives.
     deep_dive: |
       ### Terminal modes, swap files, and the frozen-vi mystery
 
@@ -410,6 +524,23 @@ lessons:
       sends XOFF — software flow control telling the driver to *stop output*. The
       editor is fine; the screen is paused. `Ctrl-Q` (XON) resumes it. This
       legacy serial-line feature traps countless beginners who think vim hung.
+
+      **Why `:` commands look like sed.** The family tree: `ed` (1971, the
+      original line editor for teletypes — no screen, you addressed lines by
+      number) → `ex`, its friendlier successor → `vi`, which is literally ex's
+      *visual mode* (the name!). Typing `:` in vi drops you back into ex, which
+      is why `:%s/old/new/g`, `:g/pat/d`, and ranges like `:10,20` exist — that
+      *is* the ed/ex command language. And `sed` is the **s**tream **ed**itor:
+      ed's commands applied to a pipe. One substitution syntax, learned once,
+      shared by three tools — plus `grep`, whose name is the ed command
+      `g/re/p` (globally match a regex and print).
+
+      **Undo is a tree, not a stack.** In vim, `u` doesn't pop edits off a
+      stack — every change becomes a node in an *undo tree*. Undo a few steps,
+      type something new, and the old future isn't destroyed; it's a parallel
+      branch, reachable with `g-`/`g+` (move through edit *time*). With
+      `set undofile` the tree is written to disk, so undo survives closing the
+      file entirely.
     cards:
       - front: "vi is 'modal' — name the three modes and how you move between them."
         back: "Normal (commands; default), Insert (typing; enter with `i`, leave with `Esc`), Command-line (`:` for save/quit/search). Esc always returns to Normal."
@@ -419,8 +550,21 @@ lessons:
         back: "`dd` deletes (cuts) the current line, `yy` yanks (copies) it, `p` pastes."
       - cloze: "Enter insert mode with `{{c1::i}}`, return to normal mode with `{{c2::Esc}}`, and replace all matches with `:%s/old/new/{{c3::g}}`."
       - cloze: "In nano the save shortcut is `{{c1::Ctrl-O}}` (^O) and exit is `{{c2::Ctrl-X}}` (^X)."
+      - front: "vim grammar: what does `d2w` do, and what is the general pattern it follows?"
+        back: "Deletes the next two words. Pattern: **[count] operator [count] motion** — e.g. `d` (delete) applied to `2w` (two words). Same grammar gives `c$`, `y3j`, `dG`, `>}`…"
+      - front: "In vi normal mode, what do `o`, `O`, `A`, and `I` do?"
+        back: "`o`/`O` open a new line below/above and enter insert mode; `A` appends at the end of the line; `I` inserts at the first non-blank character."
+      - cloze: "In vi, jump to the first line with `{{c1::gg}}`, the last line with `{{c2::G}}`, and line 42 with `{{c3::42G}}` (or `:42`)."
+      - front: "What does `.` do in vi normal mode, and why is it so powerful?"
+        back: "Repeats the last *change* (insert, delete, replace…). Make one edit, then move around pressing `.` to apply it again — one keystroke instead of re-typing the whole edit."
+      - cloze: 'In nano: cut the current line with `{{c1::Ctrl-K}}`, paste it with `{{c2::Ctrl-U}}`, and search-and-replace with `{{c3::Ctrl-\}}`.'
+      - front: "Why must you use `nano -w` (or `set nowrap`) when editing /etc/fstab or a crontab?"
+        back: "`-w` disables hard line-wrapping. Without it nano may insert a real newline into a long line — splitting one fstab/crontab entry into two broken ones, which can fail at boot or silently corrupt the schedule."
+      - front: "Which variables tell `crontab -e` or `git commit` what editor to open, and what are the safe ways to edit sudoers and passwd?"
+        back: "`VISUAL`/`EDITOR` (e.g. `export EDITOR=vim`). For system files use the validating, locking wrappers: `visudo` (sudoers), `vipw` (passwd), or `sudoedit <file>` for any root-owned file."
     feynman:
       - "Explain vi's modal design to someone used to Notepad — why isn't typing immediate?"
+      - "Explain 'vim is a language': what are the verbs and nouns, and walk through three combinations (e.g. `dw`, `c$`, `3dd`) showing how the grammar composes."
     labs:
       - title: "vim survival drill"
         slug: lab-vim-survival
@@ -448,8 +592,69 @@ lessons:
           :%s/dev/prod/g                     # replace all
           (make a stray edit)  Esc  :q!      # bail without saving
           ```
+      - title: "Config surgery — vim grammar under pressure"
+        slug: lab-vim-config-surgery
+        difficulty: challenge
+        est_minutes: 25
+        scenario: |
+          You inherit a messy service config: dead commented-out lines
+          everywhere, the wrong environment name scattered through it, a block
+          of settings that must be disabled (not deleted), and a long
+          fstab-style line that needs a careful fix. Do the whole cleanup with
+          efficient vim — counts, operators + motions, visual block, `:g` —
+          then one deliberate nano detour. No arrow-key spamming allowed.
+        deliverable: |
+          1. Create the patient. In vim, use `:r !cmd` (not the shell first!)
+             to insert this into a new file `svc.conf`:
+             `printf '# old value\nport = 8080\n# TODO remove\nenv = dev\nhost = dev.local\n# legacy\nretries = 5\ntimeout = 30\nburst = 10\ndebug = true\n'`
+          2. Purge **every** comment line with a single `:g` command.
+          3. Change every `dev` to `prod`, but confirm each match interactively.
+          4. Disable (comment out) `retries`, `timeout`, and `burst` — three
+             adjacent lines — by inserting `# ` in front of all three with ONE
+             visual-block edit.
+          5. Duplicate the `port` line, then on the copy change just the number
+             to `9090` using an operator + motion (no backspacing over text).
+          6. Open a second file `svc.conf.bak` in a vertical split, save a copy
+             there, and hop between the panes to confirm they match.
+          7. nano detour: append this line to a scratch `fstab.test` —
+             `UUID=abcd-1234 /var/data ext4 defaults,noatime,nodev,nosuid 0 2`
+             — opening nano with the flag that guarantees the long line can't
+             be wrapped, then use nano's search-and-replace to change
+             `noatime` to `relatime`, and cut+re-paste the line to prove ^K/^U.
+          Note the exact keystrokes for every step.
+        hints: |
+          - Step 1: `vim svc.conf` then `:r !printf ...` (the buffer keeps an
+            empty first line — `gg` `dd` it).
+          - Step 2: `:g/^#/d`  — step 3: `:%s/dev/prod/gc` (answer `y`/`n`).
+          - Step 4: cursor on `retries`, `Ctrl-v` `2j` `I# ` `Esc`.
+          - Step 5: `yy` `p`, then on the copy `f8` (or `f9`… wherever the
+            number starts) and `cw9090` `Esc` — or `c$` if you prefer.
+          - Step 6: `:vsp svc.conf.bak`, `Ctrl-w w` to hop, `:w`.
+          - Step 7: `nano -w fstab.test`; `^\` replace; `^K` cut, `^U` paste.
+        solution: |
+          ```
+          vim svc.conf
+          :r !printf '# old value\nport = 8080\n# TODO remove\nenv = dev\nhost = dev.local\n# legacy\nretries = 5\ntimeout = 30\nburst = 10\ndebug = true\n'
+          gg dd                       # drop the empty first line
+          :g/^#/d                     # 2: delete all comment lines at once
+          :%s/dev/prod/gc             # 3: replace with per-match confirm (y/y)
+          /retries  Enter             # 4: jump to the block
+          Ctrl-v 2j I# Esc            #    block-insert '# ' on 3 lines
+          /port  Enter  yy p          # 5: duplicate the port line
+          f8 cw9090 Esc               #    change just the number (f8 → cw)
+          :vsp svc.conf.bak           # 6: vertical split on the backup
+          Ctrl-w w                    #    hop panes
+          (in svc.conf pane) :w  then :w! svc.conf.bak from a copy, or
+          ggVG y  Ctrl-w w  p  :w     #    yank-all → paste into the bak pane
+          :wqa                        # save every window, quit
 
-  - title: "Redirection, pipes and tee"
+          nano -w fstab.test          # 7: -w = never wrap the long line
+          (type the UUID line)  ^O Enter
+          ^\ noatime Enter relatime Enter y
+          (on the line) ^K ^U ^U      # cut, paste back (twice pastes a copy —
+          ^K to remove the extra)     # you've proven cut & paste
+          ^O Enter ^X
+          ```
     slug: redirection
     order: 5
     est_minutes: 20
