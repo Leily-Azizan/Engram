@@ -47,3 +47,6 @@ Thumbs.db
 
 # --- Claude Code local files (keep personal config out of a public repo) ----
 .claude/settings.local.json
+
+# --- Markdown notes/docs (local-only; the public repo ships code + YAML) ----
+*.md
