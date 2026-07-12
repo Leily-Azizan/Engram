@@ -1,0 +1,12 @@
+#!/bin/bash
+
+DATE=$(date +%F)
+DEST=/backup
+
+mkdir -p $DEST
+
+tar czvf $DEST/etc-$DATE.tar.gz /etc
+
+find $DEST -mtime +7 -delete
+
+echo "Backup Completed"

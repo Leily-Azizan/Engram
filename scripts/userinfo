@@ -1,0 +1,14 @@
+#!/bin/bash
+
+echo "User Information"
+echo
+echo "Username : $(whoami)"
+echo "UID : $(id -u)"
+echo "Home : $HOME"
+echo "Shell : $SHELL"
+echo "Current Directory : $(pwd)"
+echo "Hostname : $(hostname)"
+echo "IP : $(ip -brief -4 addr | grep -v ^lo)"
+echo "Date : $(date)"
+echo "Logged Users:"
+who
