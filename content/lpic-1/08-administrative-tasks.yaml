@@ -2,7 +2,7 @@ chapter:
   title: "Administrative Tasks"
   slug: administrative-tasks
   order: 8
-  summary: "Manage users and groups, schedule jobs with cron/at, and handle locale and time zones."
+  summary: "Manage users, groups and password aging, monitor logins, schedule jobs with cron/at, and handle locale and time zones."
 
 lessons:
   - title: "Manage users and groups"
@@ -100,9 +100,157 @@ lessons:
           id sara
           ```
 
+  - title: "Password aging, account locks, and who's logged in"
+    slug: password-aging-and-logins
+    order: 2
+    est_minutes: 22
+    summary: "Enforce password policy with chage, lock/unlock accounts, and see who is (or was) on the machine."
+    body: |
+      ## Password aging — `chage`
+
+      Aging rules live per-account in `/etc/shadow`, next to the hash.
+      `chage` reads and writes them:
+
+      ```bash
+      sudo chage -l ali        # show ali's aging policy
+      sudo chage -d 0 ali      # force password change at NEXT login
+      sudo chage -M 90 ali     # max 90 days between changes
+      sudo chage -m 1 ali      # min 1 day (blocks instant change-back)
+      sudo chage -W 7 ali      # warn 7 days before expiry
+      sudo chage -E 2026-12-31 ali   # account (not just password) expires
+      ```
+
+      `chage -d 0` is the classic **onboarding move**: the admin sets a
+      temporary password with `passwd ali`, then expires it so ali must pick
+      his own at first login. (`passwd -e ali` is a shortcut for the same.)
+
+      ## Locking and unlocking
+
+      ```bash
+      sudo passwd -l ali       # lock (prepends ! to the hash — nothing to guess)
+      sudo passwd -u ali       # unlock
+      sudo passwd -S ali       # status: L=locked, P=usable, NP=no password
+      sudo usermod -s /usr/sbin/nologin svc-backup   # service account: no shell
+      ```
+
+      Locking beats deleting for a departing user: their files keep a valid
+      owner and you can still investigate later.
+
+      ## Who is logged in — and who was
+
+      | Command | Answers |
+      |---------|---------|
+      | `who`   | who is logged in now (terminal, time, source IP) |
+      | `w`     | who is logged in **and what they're running** (+ load) |
+      | `last`  | login **history**, newest first (incl. reboots) |
+      | `lastlog` | most recent login per account — spot never-used accounts |
+
+      ## Team directory: group-only access
+
+      The standard pattern for a shared project directory:
+
+      ```bash
+      sudo mkdir -p /srv/projects/backend
+      sudo chgrp devteam /srv/projects/backend
+      sudo chmod 2770 /srv/projects/backend
+      ```
+
+      `770` = owner+group everything, others nothing. The leading `2` is the
+      **setgid bit**: files created inside inherit the `devteam` group instead
+      of each creator's primary group, so teammates can always read each
+      other's work.
+    deep_dive: |
+      ### Days-since-epoch, a `!` in a hash, and two files the kernel appends to
+
+      **Aging is just arithmetic on day numbers.** Each `/etc/shadow` line stores
+      the *last password change* as **days since 1970-01-01** (field 3), plus
+      min/max/warn as plain day counts. At login, PAM's `pam_unix` compares
+      `today - lastchange` against `max`: if it's over, you're forced into the
+      change dialog. `chage -d 0` writes a literal `0` into field 3 — "changed on
+      Jan 1 1970" — which makes *any* `max` exceeded, and that is the whole
+      forced-change trick. An empty field 3 means "never expire-check".
+
+      **A lock is one prepended character.** `passwd -l` doesn't delete the hash;
+      it turns `$y$j9T$...` into `!$y$j9T$...`. Since `!` can never appear in a
+      valid crypt output, no input hashes to it — authentication is impossible,
+      yet `passwd -u` restores the account by deleting one byte. Compare
+      `usermod -s /usr/sbin/nologin`: the password still *works* (so `su` from
+      root, cron, and SSH keys with forced commands may still function), but an
+      interactive shell is refused. Lock the hash to stop *authentication*;
+      change the shell to stop *sessions*.
+
+      **`who` and `last` read logs, not the kernel.** There is no syscall for
+      "who is logged in". Instead, every login program (getty, sshd, your
+      terminal emulator) appends a record to `/var/run/utmp` (current sessions)
+      and `/var/log/wtmp` (permanent history). `who`/`w` parse utmp; `last`
+      parses wtmp backwards. That's why a crashed session can leave a "ghost"
+      user in `who`, and why wiping wtmp is a classic attacker move — the data
+      is only as honest as the files.
+    cards:
+      - front: "Force user ali to change his password at next login (two ways)."
+        back: "`sudo chage -d 0 ali` or `sudo passwd -e ali` — both expire the current password immediately."
+      - front: "What does `chage -l ali` show?"
+        back: "Ali's password-aging policy: last change, min/max days, warning period, and account expiry date."
+      - front: "Difference between `who` and `w`?"
+        back: "`who` lists current logins (tty, time, source); `w` adds what each user is running plus load average."
+      - front: "How does `passwd -l` lock an account under the hood?"
+        back: "It prepends `!` to the hash in /etc/shadow — no password can match, and `passwd -u` just removes the `!`."
+      - front: "Why chmod **2**770 (not 770) on a shared team directory?"
+        back: "The 2 is the setgid bit: new files inside inherit the directory's group, so all team members can access each other's files."
+      - cloze: "`{{c1::who}}` shows current logins from /var/run/{{c2::utmp}}; `{{c3::last}}` shows login history from /var/log/{{c4::wtmp}}."
+    feynman:
+      - "Explain to a junior admin why `chage -d 0` forces a password change — what exactly changes in /etc/shadow and who checks it?"
+      - "A colleague wants to delete a departing employee's account immediately. Argue for locking it instead, and show the command."
+    labs:
+      - title: "Onboard the devteam (bootcamp scenario)"
+        slug: lab-devteam-onboarding
+        difficulty: core
+        est_minutes: 25
+        scenario: |
+          Your company is standing up a development team (this is the exact
+          scenario from the DevOps bootcamp). You must: create a `devteam`
+          group; create users `ali` and `sara` and put them in it; set up
+          `/srv/projects/backend` so that **only** devteam members can access
+          it; change ali's password and make sure he's forced to change it at
+          his next login; and finally check who is currently logged in.
+        deliverable: |
+          1. Create the group `devteam`.
+          2. Create `ali` and `sara` with home dirs and Bash shells, and add
+             both to `devteam` without touching their other groups.
+          3. Create `/srv/projects/backend` owned by group `devteam`, mode
+             such that others have no access and new files inherit the group.
+          4. Set a temporary password for `ali`, then expire it so he must
+             change it on next login. Verify with `chage -l ali`.
+          5. Show who is currently logged in, and the recent login history.
+        hints: |
+          - `groupadd`, `useradd -m -s`, `usermod -aG`
+          - Directory: `chgrp` + `chmod 2770` (why the 2?)
+          - Expire: `chage -d 0` (or `passwd -e`)
+          - Sessions: `who` / `w`; history: `last`
+        solution: |
+          ```bash
+          sudo groupadd devteam
+          sudo useradd -m -s /bin/bash ali
+          sudo useradd -m -s /bin/bash sara
+          sudo usermod -aG devteam ali
+          sudo usermod -aG devteam sara
+
+          sudo mkdir -p /srv/projects/backend
+          sudo chgrp devteam /srv/projects/backend
+          sudo chmod 2770 /srv/projects/backend   # rwx owner+group, setgid
+
+          sudo passwd ali            # set temporary password
+          sudo chage -d 0 ali        # force change at next login
+          sudo chage -l ali          # verify: "Last password change: password must be changed"
+
+          who                        # current sessions
+          w                          # sessions + activity
+          last | head                # recent login history
+          ```
+
   - title: "Schedule jobs (cron and at), locale and time"
     slug: cron-locale-time
-    order: 2
+    order: 3
     est_minutes: 22
     summary: "Recurring jobs with cron, one-off jobs with at, and getting locale/timezone right."
     body: |
@@ -208,7 +356,7 @@ quiz:
   title: "Administrative Tasks — chapter exam"
   slug: lpic1-admin-tasks-exam
   scope: chapter
-  description: "Users/groups, cron/at, locale and time."
+  description: "Users/groups, password aging, login monitoring, cron/at, locale and time."
   questions:
     - type: mcq
       text: "Which file contains the password hashes?"
@@ -248,3 +396,39 @@ quiz:
       explanation: "`timedatectl set-timezone Asia/Tehran`."
       answers:
         - {value: "(sudo )?timedatectl set-timezone Asia/Tehran", match: regex}
+    - type: command
+      text: "Force user 'ali' to change his password at his next login."
+      explanation: "`chage -d 0 ali` sets the last-change date to day 0, expiring the password; `passwd -e ali` does the same."
+      answers:
+        - {value: "(sudo )?chage -d 0 ali", match: regex}
+        - {value: "(sudo )?passwd -e ali", match: regex}
+    - type: mcq
+      text: "Which command shows who is logged in AND what each user is currently running?"
+      explanation: "`w` = `who` plus each session's current command and the load average."
+      choices:
+        - {text: "w", correct: true}
+        - {text: "who"}
+        - {text: "last"}
+        - {text: "lastlog"}
+    - type: mcq
+      text: "What does the 2 in `chmod 2770 /srv/projects/backend` do?"
+      explanation: "It sets the setgid bit: files created inside inherit the directory's group instead of the creator's primary group."
+      choices:
+        - {text: "New files inside inherit the directory's group (setgid)", correct: true}
+        - {text: "Only the owner can delete files (sticky bit)"}
+        - {text: "Files run with the owner's privileges (setuid)"}
+        - {text: "It makes the directory read-only for the group"}
+    - type: true_false
+      text: "`passwd -l ali` deletes ali's password hash, so unlocking requires setting a new password."
+      explanation: "False — it only prepends `!` to the hash; `passwd -u` removes it and the old password works again."
+      choices:
+        - {text: "True"}
+        - {text: "False", correct: true}
+    - type: mcq
+      text: "Which command shows the login HISTORY (past sessions and reboots)?"
+      explanation: "`last` reads /var/log/wtmp, the permanent login history; `who`/`w` only show current sessions from utmp."
+      choices:
+        - {text: "last", correct: true}
+        - {text: "w"}
+        - {text: "who -H"}
+        - {text: "history"}
